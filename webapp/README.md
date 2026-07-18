@@ -28,9 +28,10 @@ npm test
 
 Runs every `src/**/*.test.ts` suite once via Vitest and exits green. The runner
 uses the `node` environment — **no browser, no Web Bluetooth, no DOM** — so the
-correctness-critical seams (the slot-keyed `applySync` Merge and the wire-record
-decoder, added in later tickets) are TDD'd in fast isolation. `src/lib/smoke.ts`
-+ `smoke.test.ts` are the reference pattern.
+correctness-critical seams (the boundary-dedup `applySync` Merge in
+`src/lib/history.ts`, and the wire-record decoder added in a later ticket) are
+TDD'd in fast isolation. `src/lib/smoke.ts` + `smoke.test.ts` are the reference
+pattern; `src/lib/history.test.ts` is the real thing.
 
 Web Bluetooth transport and Svelte UI rendering are out of unit-test scope
 (verified manually on-device / in a browser), per the spec's testing decisions.
