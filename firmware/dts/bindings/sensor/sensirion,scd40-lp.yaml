@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Supplementary binding for the SCD40. The upstream sensirion,scd40 binding
+# omits the `mode` selector that its sibling sensirion,scd41 declares, even
+# though the shared SCD4x driver reads `mode` for both (via DT_INST_ENUM_IDX_OR)
+# — so upstream you can never select low-power periodic mode on an SCD40.
+#
+# We can't redeclare `sensirion,scd40` (edtlib forbids two i2c bindings for the
+# same compatible), so the node lists this compatible *first* to source its
+# properties (adding `mode`) and keeps `sensirion,scd40` so the driver still
+# binds. Values match the driver's enum order.
+
+description: Sensirion SCD40 with a selectable measurement mode (kuuki-pod local).
+
+compatible: "sensirion,scd40-lp"
+
+include: [sensor-device.yaml, i2c-device.yaml]
+
+properties:
+  mode:
+    type: int
+    required: true
+    description: |
+      - 0: Normal periodic measurement (~5 s Measurement cadence).
+      - 1: Low-power periodic measurement (~30 s Measurement cadence).
+      - 2: Single-shot measurement.
+    enum:
+      - 0
+      - 1
+      - 2

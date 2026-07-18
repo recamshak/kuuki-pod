@@ -5,10 +5,13 @@ samples air quality, buffers Samples in RAM, and serves them over BLE. See
 `../CONTEXT.md` for the domain vocabulary and `../docs/specs/0001-kuuki-pod-v1.md`
 for the spec.
 
-This is the v1 skeleton: it boots and logs a banner. Sampling, the Buffer, and
-the BLE GATT service arrive in later tickets. Correctness-critical logic is
-developed off-board as pure modules under `tests/`, run on the host via
-`native_sim` — no hardware needed.
+It boots, then logs the SCD40 into the in-RAM Buffer at each Sample tick (a
+firmware constant, 15 min for v1); the sensor runs in low-power periodic mode on
+I²C. The BLE GATT service that Syncs the Buffer arrives in a later ticket.
+Correctness-critical logic — the Buffer `collect()` query and the
+Measurement→Sample scaling — is developed off-board as pure modules under
+`tests/`, run on the host via `native_sim`; the SCD40 I²C bring-up and the
+sampling loop are hardware-verified.
 
 ## Prerequisites
 

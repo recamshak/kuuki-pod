@@ -7,4 +7,6 @@ project(kuuki_pod)
 target_sources(app PRIVATE
   src/main.c
   src/buffer.c
+  src/measurement.c
+  src/sampler.c
 )

@@ -1,0 +1,24 @@
+/* SPDX-License-Identifier: Apache-2.0
+ *
+ * kuuki-pod hardware: an SCD40 wired to the XIAO's external I²C bus (xiao_i2c =
+ * i2c1, pins D4/D5 = P0.04/P0.05). The sensor lives at the SCD4x's fixed I²C
+ * address 0x62 and runs in low-power periodic mode (~30 s Measurement cadence),
+ * per the v1 spec (ticket 05). ASC stays on and the temperature offset at its
+ * default (ADR-0003) by omission: the SCD4x driver's init writes neither (they
+ * are only touched via attr_set, which the firmware never calls), so the sensor
+ * keeps its power-on defaults — ASC enabled, default offset.
+ */
+
+&xiao_i2c {
+	status = "okay";
+
+	scd40: scd40@62 {
+		/* sensirion,scd40-lp (first) sources the properties and adds the
+		 * `mode` selector the upstream binding lacks; sensirion,scd40
+		 * (second) is what the SCD4x driver binds to. See the local
+		 * binding dts/bindings/sensor/sensirion,scd40-lp.yaml. */
+		compatible = "sensirion,scd40-lp", "sensirion,scd40";
+		reg = <0x62>;
+		mode = <1>; /* low-power periodic */
+	};
+};
