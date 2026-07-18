@@ -118,22 +118,34 @@ static int start_advertising(void)
 	return bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 }
 
+static void advertise_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	int err = start_advertising();
+	if (err) {
+		LOG_ERR("Advertising failed to resume (%d)", err);
+	}
+}
+
+static K_WORK_DEFINE(advertise_work, advertise_work_handler);
+
 /*
  * Connectable advertising stops the instant a client connects, so on disconnect
  * we restart it — otherwise the Pod goes silent after its first Sync and is
  * never reachable again. This is what keeps it "connectable any time" (ticket
  * 06) across repeated visits from one or several clients.
+ *
+ * The restart is deferred to the system workqueue rather than run inline: the
+ * disconnected connection object is not recycled until this callback returns, so
+ * starting a connectable advertiser here races it and fails with -ENOMEM.
  */
 static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(conn);
 
 	LOG_INF("Disconnected (reason 0x%02x); resuming advertising", reason);
-
-	int err = start_advertising();
-	if (err) {
-		LOG_ERR("Advertising failed to resume (%d)", err);
-	}
+	k_work_submit(&advertise_work);
 }
 
 static void on_connected(struct bt_conn *conn, uint8_t err)
