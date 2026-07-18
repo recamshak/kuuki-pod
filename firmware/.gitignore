@@ -1,0 +1,4 @@
+# Zephyr / west build output
+build/
+twister-out/
+twister-out.*/
