@@ -17,13 +17,20 @@
 #define KUUKI_BLE_H
 
 struct sample;
+struct buffer;
+struct k_mutex;
 
 /*
  * Bring up Bluetooth and start advertising the Pod's service. Requires the Pod
  * ID to be initialised first (pod_id_init()), since the service serves it.
- * Returns 0 once advertising is running, or a negative errno on failure.
+ *
+ * buf is the Pod's Buffer, streamed to a client on a Sync (ticket 07); buf_lock
+ * serialises its collect() reads here against the sampler's concurrent writes.
+ * Both must outlive the Pod (they are the application's single long-lived
+ * Buffer and its lock). Returns 0 once advertising is running, or a negative
+ * errno on failure.
  */
-int ble_start(void);
+int ble_start(struct buffer *buf, struct k_mutex *buf_lock);
 
 /*
  * Publish s as the current Live reading: update the readable characteristic

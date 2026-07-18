@@ -18,13 +18,16 @@
 #define KUUKI_SAMPLER_H
 
 struct buffer;
+struct k_mutex;
 
 /*
  * Start the Sample tick loop against buf. Spawns a dedicated thread that runs
  * for the lifetime of the Pod; buf must outlive it (it is the application's
- * single long-lived Buffer). Returns 0 once the thread is started, or a
- * negative errno if the SCD40 is not ready.
+ * single long-lived Buffer). buf_lock serialises Buffer access against the
+ * concurrent Sync reader (ticket 07): the sampler holds it around each
+ * buffer_put() so a Sync never observes a half-written ring. Returns 0 once the
+ * thread is started, or a negative errno if the SCD40 is not ready.
  */
-int sampler_start(struct buffer *buf);
+int sampler_start(struct buffer *buf, struct k_mutex *buf_lock);
 
 #endif /* KUUKI_SAMPLER_H */

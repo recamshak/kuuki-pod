@@ -53,6 +53,9 @@ static struct k_thread sampler_thread;
 /* The application's long-lived Buffer, borrowed for the sampler's lifetime. */
 static struct buffer *target;
 
+/* Serialises Buffer writes here against the Sync reader (ticket 07). */
+static struct k_mutex *buffer_lock;
+
 /*
  * Read the SCD40's latest Measurement into *out. Returns true on a fresh, real
  * Measurement; false (nothing written) when the fetch fails or the sensor has
@@ -114,7 +117,11 @@ static void sampler_run(void *p1, void *p2, void *p3)
 			if (last_sample_uptime == INT64_MIN ||
 			    (int64_t)s.capture_uptime - last_sample_uptime >=
 				    SAMPLE_INTERVAL_SEC) {
+				/* Hold buffer_lock so a concurrent Sync's
+				 * collect() never reads a half-written ring. */
+				k_mutex_lock(buffer_lock, K_FOREVER);
 				buffer_put(target, &s);
+				k_mutex_unlock(buffer_lock);
 				last_sample_uptime = s.capture_uptime;
 
 				LOG_INF("Sample @%us: CO2 %u ppm, temp %d.%02d C, "
@@ -129,7 +136,7 @@ static void sampler_run(void *p1, void *p2, void *p3)
 	}
 }
 
-int sampler_start(struct buffer *buf)
+int sampler_start(struct buffer *buf, struct k_mutex *buf_lock)
 {
 	if (!device_is_ready(scd40)) {
 		LOG_ERR("SCD40 not ready; sampling disabled");
@@ -137,6 +144,7 @@ int sampler_start(struct buffer *buf)
 	}
 
 	target = buf;
+	buffer_lock = buf_lock;
 	k_thread_create(&sampler_thread, sampler_stack, SAMPLER_STACK_SIZE,
 			sampler_run, NULL, NULL, NULL, SAMPLER_PRIORITY, 0,
 			K_NO_WAIT);

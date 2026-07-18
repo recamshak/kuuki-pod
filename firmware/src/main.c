@@ -29,6 +29,14 @@ LOG_MODULE_REGISTER(kuuki_pod, LOG_LEVEL_INF);
  */
 static struct buffer sample_buffer;
 
+/*
+ * Serialises Buffer access between the two threads that share it: the sampler
+ * writes it at each Sample tick, a Sync reads it via collect() (ticket 07). The
+ * application owns the lock and hands it to both so the Buffer module itself
+ * stays pure (no Zephyr primitives).
+ */
+static K_MUTEX_DEFINE(buffer_lock);
+
 int main(void)
 {
 	LOG_INF("kuuki-pod booting");
@@ -43,12 +51,12 @@ int main(void)
 		return 0;
 	}
 
-	err = ble_start();
+	err = ble_start(&sample_buffer, &buffer_lock);
 	if (err) {
 		LOG_ERR("BLE failed to start (%d)", err);
 	}
 
-	err = sampler_start(&sample_buffer);
+	err = sampler_start(&sample_buffer, &buffer_lock);
 	if (err) {
 		LOG_ERR("Sampler failed to start (%d)", err);
 	}

@@ -10,6 +10,7 @@ target_sources(app PRIVATE
   src/measurement.c
   src/sampler.c
   src/live.c
+  src/sync.c
   src/pod_id.c
   src/ble.c
 )
