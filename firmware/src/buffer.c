@@ -29,18 +29,11 @@ void buffer_put(struct buffer *buf, const struct sample *s)
 	 * put() overwrites it — the ring keeps the most recent BUFFER_CAPACITY. */
 }
 
-/* Snap an Age to its Sample-interval slot index (nearest quarter-hour). */
-static uint32_t age_to_slot(uint32_t age)
-{
-	return (age + SAMPLE_INTERVAL_SEC / 2) / SAMPLE_INTERVAL_SEC;
-}
-
 size_t buffer_collect(const struct buffer *buf, uint32_t latch_uptime,
 		      uint32_t high_water_age, struct sync_record *out,
 		      size_t out_cap)
 {
 	bool everything = (high_water_age == MARK_SENTINEL);
-	uint32_t hw_slot = everything ? 0 : age_to_slot(high_water_age);
 
 	/* The oldest stored Sample sits `count` slots behind `next`. */
 	size_t oldest = (buf->next + BUFFER_CAPACITY - buf->count) % BUFFER_CAPACITY;
@@ -51,9 +44,13 @@ size_t buffer_collect(const struct buffer *buf, uint32_t latch_uptime,
 			&buf->samples[(oldest + i) % BUFFER_CAPACITY];
 		uint32_t age = latch_uptime - s->capture_uptime;
 
-		/* Trim Samples the client already has: same slot as the mark, or
-		 * older (larger Age ⇒ larger slot). Only strictly-newer slots pass. */
-		if (!everything && age_to_slot(age) >= hw_slot) {
+		/* Trim Samples the client already has: emit only those at least
+		 * half a Sample interval newer than the mark. The half-interval
+		 * guard band excludes the boundary Sample the client already holds
+		 * despite sub-interval clock skew in `mark` (it's measured on the
+		 * client's clock, not this latch), while every genuinely newer
+		 * Sample — a full interval further on — still passes. */
+		if (!everything && age + SAMPLE_INTERVAL_SEC / 2 >= high_water_age) {
 			continue;
 		}
 
