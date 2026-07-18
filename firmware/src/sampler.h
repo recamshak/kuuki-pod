@@ -5,10 +5,13 @@
  *
  * This is the on-device half of sampling (ticket 05): I²C, the sensor
  * subsystem, and timing live here, so — unlike measurement_to_sample() and the
- * Buffer — it is verified on hardware, not under host ztests. It reads the
- * SCD40's latest Measurement at each Sample tick, promotes it to one Sample
- * with its capture uptime, and stores it in the Buffer, sleeping between ticks.
- * Vocabulary (Sample tick, Measurement, Sample, Buffer) follows CONTEXT.md.
+ * Buffer — it is verified on hardware, not under host ztests. It wakes at the
+ * SCD40's Measurement cadence (~30 s), reads the latest Measurement, and
+ * publishes it as the Live reading (ticket 06) so a connecting client sees "right
+ * now" immediately; every Sample interval it also promotes that Measurement to a
+ * Sample with its capture uptime and stores it in the Buffer.
+ * Vocabulary (Sample tick, Measurement, Sample, Buffer, Live reading) follows
+ * CONTEXT.md.
  */
 
 #ifndef KUUKI_SAMPLER_H

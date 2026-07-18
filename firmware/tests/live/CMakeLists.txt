@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(kuuki_pod_live_test)
+
+# live_encode() is pure: compile the production source straight into the host
+# test binary and exercise it through its public API.
+set(KUUKI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+target_include_directories(app PRIVATE ${KUUKI_SRC})
+target_sources(app PRIVATE
+  src/main.c
+  ${KUUKI_SRC}/live.c
+)

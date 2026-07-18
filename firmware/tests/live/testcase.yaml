@@ -1,0 +1,9 @@
+# Twister discovers this suite and runs it on the host via native_sim.
+tests:
+  kuuki_pod.live:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    tags:
+      - live

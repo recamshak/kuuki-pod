@@ -1,12 +1,14 @@
 # Sync wire contract
 
-The byte-exact framing of the **Sync** stream and its **Sync control** trigger. This is the
-single source of truth for the on-wire format: firmware (ticket 07) and webapp (ticket 09)
-each encode/decode against **this** document and must not redefine the layout anywhere else.
-Any constant either side names in code (e.g. `RECORD_SIZE`) takes its value from the tables
+The byte-exact framing of the **Sync** stream and its **Sync control** trigger, plus the
+**Live reading** characteristic's payload (ticket 06). This is the single source of truth for
+the on-wire format: firmware (tickets 06, 07) and webapp (tickets 09, 10) each encode/decode
+against **this** document and must not redefine the layout anywhere else. Any constant either
+side names in code (e.g. `RECORD_SIZE`, `LIVE_READING_SIZE`) takes its value from the tables
 below.
 
-Vocabulary follows `CONTEXT.md` (Sample, Sync, Age, High-water mark, Latched read instant).
+Vocabulary follows `CONTEXT.md` (Sample, Sync, Age, High-water mark, Latched read instant,
+Live reading, Measurement).
 Ordering rationale is `docs/adr/0002-oldest-first-sync-transfer.md`.
 
 ## Conventions
@@ -81,12 +83,35 @@ knows the Sync is complete when it receives a notification with an empty (0-byte
   Sync's advanced High-water mark re-fetches exactly the lost tail (ADR-0002). Absence of the
   marker is precisely the "incomplete Sync" signal.
 
+## Live reading characteristic (Pod → client)
+
+The **Live reading** is exposed as its own BLE characteristic (read + notify), separate from the
+Sync stream, so a client sees "right now" the instant it connects (CONTEXT.md). Its payload is
+the Sync data record's three Measurement fields **without** the `age`: a Live reading is always
+"now", so it carries no Age and is never buffered as a Sample.
+
+| Offset | Field      | Type   | Units       | Range described                            |
+| -----: | ---------- | ------ | ----------- | ------------------------------------------ |
+|      0 | `co2`      | uint16 | ppm         | 0 – 65535 (SCD40 tops out ~40000)          |
+|      2 | `temp`     | int16  | centi-°C    | −327.68 – 327.67 °C (e.g. 2143 = 21.43 °C) |
+|      4 | `humidity` | uint16 | centi-%RH   | 0 – 655.35 %RH (0 – 100 in practice)       |
+
+**`LIVE_READING_SIZE = 6` bytes**, little-endian, packed — `RECORD_SIZE` minus the 4-byte `age`.
+
+- **`co2 == 0` means "no Measurement yet".** A real room is never 0 ppm CO₂, so the Pod uses 0 as
+  the sentinel for the brief window after boot before the SCD40's first Measurement (~30 s); the
+  client treats a Live reading with `co2 == 0` as "not available yet" rather than displaying it.
+  This is the same guard that keeps a bogus 0-ppm Measurement out of the Buffer as a Sample.
+- A read returns the most recent Measurement; a notification is sent on each new Measurement to
+  any subscribed client, independent of any Sync.
+
 ## Canonical constants
 
 Both sides name these with these values; no other document or module redefines them.
 
-| Name              | Value        | Meaning                                        |
-| ----------------- | ------------ | ---------------------------------------------- |
-| `RECORD_SIZE`     | `10`         | Bytes per Sync data record                     |
+| Name              | Value        | Meaning                                          |
+| ----------------- | ------------ | ------------------------------------------------ |
+| `RECORD_SIZE`     | `10`         | Bytes per Sync data record                       |
+| `LIVE_READING_SIZE`| `6`         | Bytes of the Live reading characteristic payload |
 | `ATT_NTF_OVERHEAD`| `3`          | ATT bytes subtracted from MTU for a notification |
-| `MARK_SENTINEL`   | `0xFFFFFFFF` | High-water mark meaning "send everything"      |
+| `MARK_SENTINEL`   | `0xFFFFFFFF` | High-water mark meaning "send everything"        |
