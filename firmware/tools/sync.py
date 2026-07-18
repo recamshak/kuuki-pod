@@ -11,20 +11,28 @@
 # temp i16 centi-C, humidity u16 centi-%RH) until the zero-length end-of-batch
 # marker. A Sync with no records newer than the mark ends with only the marker.
 #
+# The High-water mark on the wire is an Age (seconds ago), but you pass it as a
+# wall-clock --since datetime: the Age depends on when you run, an absolute time
+# does not. --since takes the same 'YYYY-MM-DD HH:MM:SS' shape printed for each
+# Sample, so you can copy a line's time straight back in; it is converted to
+# now - since at the moment of the write.
+#
 # Because records stream oldest-first (ADR-0002), interrupting a Sync (Ctrl-C,
-# or moving out of range) and re-running with the advanced --mark re-fetches only
-# the tail that did not arrive — the on-device self-healing check.
+# or moving out of range) and re-running re-fetches only the tail that did not
+# arrive — the on-device self-healing check. Re-run with --since set to the
+# newest time you already received.
 #
 # Usage:
 #   pip install bleak
-#   ./sync.py                 # scan for "kuuki-pod", Sync everything (sentinel)
-#   ./sync.py --mark 3600     # Sync only Samples newer than ~1 h ago
+#   ./sync.py                              # scan for "kuuki-pod", Sync everything
+#   ./sync.py --since '2026-07-19 07:30:00'  # only Samples newer than that
 #   ./sync.py --name my-pod
 
 import argparse
 import asyncio
 import struct
 import time
+from datetime import datetime
 
 from bleak import BleakClient, BleakScanner
 
@@ -35,6 +43,30 @@ SYNC_DATA_UUID = "4b75756b-692d-706f-6400-000000000005"
 
 RECORD_SIZE = 10  # docs/wire-contract.md
 MARK_SENTINEL = 0xFFFFFFFF  # "I have nothing — send everything."
+
+# One format shared by the per-Sample printout and --since, so output pastes
+# straight back into the argument.
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def parse_since(s: str) -> int:
+    """Convert a --since datetime to a High-water mark (Age in seconds).
+
+    Accepts the same TIME_FORMAT shape printed for each Sample, so a line's time
+    can be pasted straight back in. Returns now - since in seconds, the Age the
+    Pod keys Samples by — computed here so an absolute time stays fixed however
+    long you wait before running.
+    """
+    try:
+        dt = datetime.strptime(s.strip(), TIME_FORMAT)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{s!r} is not a datetime like '2026-07-19 07:30:00'")
+
+    age = (datetime.now() - dt).total_seconds()
+    if age < 0:
+        raise argparse.ArgumentTypeError(f"{s!r} is in the future")
+    return int(age)
 
 
 def decode_records(payload: bytes) -> list[tuple]:
@@ -66,7 +98,7 @@ async def run(name: str, mark: int, timeout: float) -> None:
                   f"number of {RECORD_SIZE}-byte records")
         for age, co2, temp, humidity in decode_records(payload):
             count += 1
-            wall = time.strftime("%H:%M:%S", time.localtime(time.time() - age))
+            wall = datetime.fromtimestamp(time.time() - age).strftime(TIME_FORMAT)
             print(f"  #{count:<4} age={age:>7}s (~{wall})  "
                   f"co2={co2} ppm  temp={temp:.2f} C  humidity={humidity:.2f} %")
 
@@ -77,7 +109,7 @@ async def run(name: str, mark: int, timeout: float) -> None:
         # Subscribe before writing the control mark, so no record is missed.
         await client.start_notify(SYNC_DATA_UUID, on_data)
 
-        mark_label = "sentinel (everything)" if mark == MARK_SENTINEL else f"{mark}s"
+        mark_label = "sentinel (everything)" if mark == MARK_SENTINEL else f"{mark}s ago"
         print(f"Beginning Sync with High-water mark = {mark_label}...")
         await client.write_gatt_char(SYNC_CTRL_UUID, struct.pack("<I", mark),
                                      response=True)
@@ -96,8 +128,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a Sync against the Pod over BLE.")
     parser.add_argument("--name", default="kuuki-pod", help="advertised device name")
     parser.add_argument(
-        "--mark", type=lambda s: int(s, 0), default=MARK_SENTINEL,
-        help="High-water mark in seconds (Age); default sentinel = everything",
+        "--since", type=parse_since, default=None,
+        help="only Sync Samples newer than this datetime, in the same "
+             "'2026-07-19 07:30:00' shape printed per Sample. Default: everything.",
     )
     parser.add_argument(
         "--timeout", type=float, default=60.0,
@@ -105,8 +138,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    mark = MARK_SENTINEL if args.since is None else args.since
+
     try:
-        asyncio.run(run(args.name, args.mark, args.timeout))
+        asyncio.run(run(args.name, mark, args.timeout))
     except KeyboardInterrupt:
         pass
 
