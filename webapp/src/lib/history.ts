@@ -50,6 +50,16 @@ export interface KeyValueStore {
   removeItem(key: string): void;
 }
 
+/**
+ * A `KeyValueStore` that can also be enumerated (the `length`/`key(i)` pair of
+ * the Web Storage API). `localStorage` satisfies it; `listPodIds` needs it to
+ * discover which Pods have History without a live connection.
+ */
+export interface EnumerableKeyValueStore extends KeyValueStore {
+  readonly length: number;
+  key(index: number): string | null;
+}
+
 export interface HistoryOptions {
   /** Where to persist. Defaults to the ambient `localStorage` (undefined under Node). */
   store?: KeyValueStore;
@@ -139,6 +149,22 @@ export class History {
       return [];
     }
   }
+}
+
+/**
+ * The Pod IDs that already have persisted History in `store`, so the webapp can
+ * open a Pod's chart on reload with no Bluetooth connection (ticket 10). Defaults
+ * to the ambient `localStorage`; returns empty when no store is available.
+ */
+export function listPodIds(store?: EnumerableKeyValueStore): string[] {
+  const s = store ?? (globalThis as { localStorage?: EnumerableKeyValueStore }).localStorage;
+  if (!s) return [];
+  const ids: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const key = s.key(i);
+    if (key?.startsWith(KEY_PREFIX)) ids.push(key.slice(KEY_PREFIX.length));
+  }
+  return ids;
 }
 
 /**
