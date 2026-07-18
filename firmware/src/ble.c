@@ -113,6 +113,46 @@ static const struct bt_data sd[] = {
 static const struct bt_le_adv_param adv_param = BT_LE_ADV_PARAM_INIT(
 	BT_LE_ADV_OPT_CONN, BT_GAP_ADV_SLOW_INT_MIN, BT_GAP_ADV_SLOW_INT_MAX, NULL);
 
+static int start_advertising(void)
+{
+	return bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+}
+
+/*
+ * Connectable advertising stops the instant a client connects, so on disconnect
+ * we restart it — otherwise the Pod goes silent after its first Sync and is
+ * never reachable again. This is what keeps it "connectable any time" (ticket
+ * 06) across repeated visits from one or several clients.
+ */
+static void on_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+
+	LOG_INF("Disconnected (reason 0x%02x); resuming advertising", reason);
+
+	int err = start_advertising();
+	if (err) {
+		LOG_ERR("Advertising failed to resume (%d)", err);
+	}
+}
+
+static void on_connected(struct bt_conn *conn, uint8_t err)
+{
+	ARG_UNUSED(conn);
+
+	if (err) {
+		LOG_WRN("Connection failed (0x%02x)", err);
+		return;
+	}
+
+	LOG_INF("Connected");
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = on_connected,
+	.disconnected = on_disconnected,
+};
+
 void ble_live_update(const struct sample *s)
 {
 	live_encode(s, live_value);
@@ -131,7 +171,7 @@ int ble_start(void)
 		return err;
 	}
 
-	err = bt_le_adv_start(&adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+	err = start_advertising();
 	if (err) {
 		LOG_ERR("Advertising failed to start (%d)", err);
 		return err;
