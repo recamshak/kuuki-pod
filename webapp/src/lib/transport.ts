@@ -158,6 +158,19 @@ export class PodConnection {
     const device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [SERVICE_UUID] }],
     });
+    return PodConnection.fromDevice(device, options);
+  }
+
+  /**
+   * Bring up the link to a device we already hold (from the chooser or from
+   * getDevices() on reload): connect GATT, read the Pod ID to key History, and
+   * subscribe the Live reading. Shared by the gesture-driven `connect()` and the
+   * gesture-free `reconnectPods()`.
+   */
+  static async fromDevice(
+    device: BluetoothDevice,
+    options: ConnectOptions = {},
+  ): Promise<PodConnection> {
     const server = await device.gatt!.connect();
     const service = await server.getPrimaryService(SERVICE_UUID);
 
@@ -197,4 +210,69 @@ export class PodConnection {
 /** Connect to a Pod on demand. Must be called from a user gesture (Web Bluetooth). */
 export function connectPod(options?: ConnectOptions): Promise<PodConnection> {
   return PodConnection.connect(options);
+}
+
+/**
+ * Re-link, with no user gesture, every Pod permitted in an earlier session, calling
+ * `onReconnect` for each as it comes up. Web Bluetooth remembers devices granted
+ * through `requestDevice()`; after a reload `getDevices()` returns them.
+ *
+ * The catch is that a restored device usually can't be reached by `gatt.connect()`
+ * straight away: on reload Chrome has dropped the link and won't reconnect until it
+ * re-discovers the Pod by scanning. So we try a direct connect first (the fast path
+ * when the OS still holds the link, e.g. a connected Pod that no longer advertises),
+ * and otherwise wait for the Pod to advertise and connect then. A Pod that is asleep
+ * or out of range simply never fires; a later manual Connect or a future reload
+ * re-links it. `getDevices()` is Chrome-only, so elsewhere this is a no-op and the
+ * app falls back to the manual Connect button.
+ */
+export async function reconnectPods(
+  onReconnect: (conn: PodConnection) => void,
+  options?: ConnectOptions,
+): Promise<void> {
+  const bluetooth = navigator.bluetooth;
+  if (!bluetooth?.getDevices) return;
+
+  const devices = await bluetooth.getDevices();
+  for (const device of devices) reconnectDevice(device, onReconnect, options);
+}
+
+/** Re-link one restored device: direct connect if possible, else on next advertisement. */
+async function reconnectDevice(
+  device: BluetoothDevice,
+  onReconnect: (conn: PodConnection) => void,
+  options?: ConnectOptions,
+): Promise<void> {
+  // Fast path: the OS may still hold the link, so a direct connect just works.
+  try {
+    onReconnect(await PodConnection.fromDevice(device, options));
+    return;
+  } catch {
+    // Not immediately reachable — fall through and wait for the Pod to advertise.
+  }
+
+  if (typeof device.watchAdvertisements !== 'function') return;
+
+  // Stop scanning as soon as the Pod shows up (the current API stops via AbortSignal).
+  const scan = new AbortController();
+  device.addEventListener(
+    'advertisementreceived',
+    async () => {
+      scan.abort();
+      try {
+        onReconnect(await PodConnection.fromDevice(device, options));
+      } catch (err) {
+        // In range but the connect still failed — leave it for a manual Connect.
+        console.warn(`Pod reconnect failed for ${device.name ?? device.id}`, err);
+      }
+    },
+    { once: true, signal: scan.signal },
+  );
+
+  try {
+    await device.watchAdvertisements({ signal: scan.signal });
+  } catch {
+    // Scanning is unsupported or blocked (needs an experimental flag on some builds).
+    scan.abort();
+  }
 }

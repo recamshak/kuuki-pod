@@ -9,11 +9,18 @@
    *     connection, so the chart survives a reload without a re-Sync.
    * Merge, decode, transport, banding and windowing all live in ./lib under test.
    */
-  import Chart from './lib/Chart.svelte';
-  import { co2Band, RANGES, selectRange, toPlotData, type PlotData, type Range } from './lib/dashboard';
-  import { History, listPodIds } from './lib/history';
-  import type { LiveReading } from './lib/wire';
-  import { connectPod, PodConnection } from './lib/transport';
+  import Chart from "./lib/Chart.svelte";
+  import {
+    co2Band,
+    RANGES,
+    selectRange,
+    toPlotData,
+    type PlotData,
+    type Range,
+  } from "./lib/dashboard";
+  import { History, listPodIds } from "./lib/history";
+  import type { LiveReading } from "./lib/wire";
+  import { connectPod, reconnectPods, PodConnection } from "./lib/transport";
 
   // Non-reactive registries keyed by Pod ID; reactivity is driven by the $state
   // below (selection, live readings, a data-version bump after each Merge).
@@ -30,7 +37,8 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  const supported = typeof navigator !== 'undefined' && 'bluetooth' in navigator;
+  const supported =
+    typeof navigator !== "undefined" && "bluetooth" in navigator;
 
   // Load persisted Pods up front so a reload shows the chart with no connection.
   const persistedIds = listPodIds();
@@ -38,15 +46,36 @@
   knownPodIds = persistedIds;
   if (persistedIds.length === 1) selectedPodId = persistedIds[0];
 
-  const selectedHistory = $derived(selectedPodId ? histories.get(selectedPodId) : undefined);
-  const live = $derived(selectedPodId ? (liveByPod[selectedPodId] ?? null) : null);
+  // Then, without a click, re-link any Pod still in range (persistent pairing), so
+  // a reload restores the live connection — not just the chart — on its own. Each
+  // Pod arrives via the callback as it comes up (immediately, or once it advertises).
+  if (supported) {
+    reconnectPods((conn) =>
+      runBusy(async () => {
+        register(conn);
+        await conn.sync();
+        dataVersion++;
+      }),
+    );
+  }
+
+  const selectedHistory = $derived(
+    selectedPodId ? histories.get(selectedPodId) : undefined,
+  );
+  const live = $derived(
+    selectedPodId ? (liveByPod[selectedPodId] ?? null) : null,
+  );
   const band = $derived(live ? co2Band(live.co2) : null);
-  const connected = $derived(selectedPodId ? connections.has(selectedPodId) : false);
+  const connected = $derived(
+    selectedPodId ? connections.has(selectedPodId) : false,
+  );
 
   const plotData = $derived.by<PlotData>(() => {
     dataVersion; // establish the dependency: recompute after each Merge
     if (!selectedHistory) return [[], [], [], []];
-    return toPlotData(selectRange(selectedHistory.samples(), range.ms, Date.now()));
+    return toPlotData(
+      selectRange(selectedHistory.samples(), range.ms, Date.now()),
+    );
   });
   const hasHistory = $derived(plotData[0].length > 0);
 
@@ -63,6 +92,23 @@
     }
   }
 
+  /**
+   * Wire a fresh PodConnection into the reactive UI state: register it under its
+   * Pod ID, expose its History, seed and subscribe its Live reading, and auto-select
+   * it when nothing is selected yet. Shared by manual Connect and reload-reconnect.
+   */
+  function register(conn: PodConnection): string {
+    const id = conn.podId;
+    connections.set(id, conn);
+    histories.set(id, conn.history);
+    if (!knownPodIds.includes(id)) knownPodIds = [...knownPodIds, id];
+    if (selectedPodId === null) selectedPodId = id;
+    liveByPod = { ...liveByPod, [id]: conn.liveReading };
+    conn.onLiveReading = (r) => (liveByPod = { ...liveByPod, [id]: r });
+    conn.onDisconnected = () => connections.delete(id);
+    return id;
+  }
+
   function connect(): Promise<void> {
     return runBusy(async () => {
       let conn: PodConnection;
@@ -70,17 +116,11 @@
         conn = await connectPod();
       } catch (e) {
         // A cancelled device chooser is a normal no-op, not an error to surface.
-        if (e instanceof DOMException && e.name === 'NotFoundError') return;
+        if (e instanceof DOMException && e.name === "NotFoundError") return;
         throw e;
       }
-      const id = conn.podId;
-      connections.set(id, conn);
-      histories.set(id, conn.history);
-      if (!knownPodIds.includes(id)) knownPodIds = [...knownPodIds, id];
-      selectedPodId = id;
-      liveByPod = { ...liveByPod, [id]: conn.liveReading };
-      conn.onLiveReading = (r) => (liveByPod = { ...liveByPod, [id]: r });
-      conn.onDisconnected = () => connections.delete(id);
+      // Manual Connect is an explicit choice: focus the Pod the user just picked.
+      selectedPodId = register(conn);
       await conn.sync();
       dataVersion++;
     });
@@ -95,14 +135,15 @@
     });
   }
 
-  const co2Text = $derived(live ? String(live.co2) : '––');
-  const tempText = $derived(live ? `${(live.temp / 100).toFixed(1)} °C` : '––');
-  const humidityText = $derived(live ? `${Math.round(live.humidity / 100)} %` : '––');
+  const co2Text = $derived(live ? String(live.co2) : "––");
+  const tempText = $derived(live ? `${(live.temp / 100).toFixed(1)} °C` : "––");
+  const humidityText = $derived(
+    live ? `${Math.round(live.humidity / 100)} %` : "––",
+  );
 </script>
 
 <main>
   <header>
-    <h1>kuuki-pod</h1>
     {#if knownPodIds.length > 1}
       <select bind:value={selectedPodId} aria-label="Pod">
         {#each knownPodIds as id (id)}
@@ -113,7 +154,9 @@
   </header>
 
   {#if !supported}
-    <p class="notice">Web Bluetooth isn't available in this browser. Use Chrome or Edge.</p>
+    <p class="notice">
+      Web Bluetooth isn't available in this browser. Use Chrome or Edge.
+    </p>
   {/if}
 
   <section class="hero" style={band ? `--band: ${band.color}` : undefined}>
@@ -124,7 +167,9 @@
     {#if band}
       <span class="verdict">{band.label}</span>
     {:else}
-      <span class="verdict muted">{connected ? 'Waiting for a reading…' : 'Not connected'}</span>
+      <span class="verdict muted"
+        >{connected ? "Waiting for a reading…" : "Not connected"}</span
+      >
     {/if}
     <div class="secondary">
       <span>{tempText}</span>
@@ -134,7 +179,7 @@
 
   <section class="controls">
     <button onclick={connect} disabled={!supported || busy}>
-      {busy ? 'Working…' : 'Connect a Pod'}
+      {busy ? "Working…" : "Connect a Pod"}
     </button>
     {#if connected}
       <button onclick={sync} disabled={busy}>Sync</button>
@@ -148,15 +193,27 @@
   <section class="chart-panel">
     <div class="range">
       {#each RANGES as r (r.label)}
-        <button class:selected={r === range} onclick={() => (range = r)}>{r.label}</button>
+        <button
+          class:selected={r.label === range.label}
+          onclick={() => (range = r)}>{r.label}</button
+        >
       {/each}
       <label><input type="checkbox" bind:checked={showTemp} /> Temp</label>
-      <label><input type="checkbox" bind:checked={showHumidity} /> Humidity</label>
+      <label
+        ><input type="checkbox" bind:checked={showHumidity} /> Humidity</label
+      >
     </div>
     {#if hasHistory}
-      <Chart data={plotData} co2Color={band?.color ?? '#3fb950'} {showTemp} {showHumidity} />
+      <Chart
+        data={plotData}
+        co2Color={band?.color ?? "#3fb950"}
+        {showTemp}
+        {showHumidity}
+      />
     {:else}
-      <p class="notice muted">No history yet — Connect a Pod and Sync to build the chart.</p>
+      <p class="notice muted">
+        No history yet — Connect a Pod and Sync to build the chart.
+      </p>
     {/if}
   </section>
 </main>
