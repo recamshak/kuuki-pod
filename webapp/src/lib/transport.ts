@@ -213,18 +213,15 @@ export function connectPod(options?: ConnectOptions): Promise<PodConnection> {
 }
 
 /**
- * Re-link, with no user gesture, every Pod permitted in an earlier session, calling
- * `onReconnect` for each as it comes up. Web Bluetooth remembers devices granted
- * through `requestDevice()`; after a reload `getDevices()` returns them.
+ * Keep every Pod permitted in an earlier session linked, with no user gesture,
+ * calling `onReconnect` with a fresh connection each time one comes up — on load
+ * and again after every drop. Web Bluetooth remembers devices granted through
+ * `requestDevice()`; after a reload `getDevices()` returns them.
  *
- * The catch is that a restored device usually can't be reached by `gatt.connect()`
- * straight away: on reload Chrome has dropped the link and won't reconnect until it
- * re-discovers the Pod by scanning. So we try a direct connect first (the fast path
- * when the OS still holds the link, e.g. a connected Pod that no longer advertises),
- * and otherwise wait for the Pod to advertise and connect then. A Pod that is asleep
- * or out of range simply never fires; a later manual Connect or a future reload
- * re-links it. `getDevices()` is Chrome-only, so elsewhere this is a no-op and the
- * app falls back to the manual Connect button.
+ * `getDevices()` is Chrome-only, so elsewhere this is a no-op and the app falls
+ * back to the manual Connect button. A fresh connection re-delivered for a Pod the
+ * caller already knows is safe: its History reloads the same persisted Samples from
+ * localStorage (history.ts), so nothing accumulated is lost across a reconnect.
  */
 export async function reconnectPods(
   onReconnect: (conn: PodConnection) => void,
@@ -234,45 +231,88 @@ export async function reconnectPods(
   if (!bluetooth?.getDevices) return;
 
   const devices = await bluetooth.getDevices();
-  for (const device of devices) reconnectDevice(device, onReconnect, options);
+  for (const device of devices) superviseDevice(device, onReconnect, options);
 }
 
-/** Re-link one restored device: direct connect if possible, else on next advertisement. */
-async function reconnectDevice(
+/**
+ * Keep one restored device linked for as long as the app runs. The loop only ever
+ * does one of two things: bring the link up when it is down, or wait for it to drop.
+ *
+ * Bringing it up tries a direct `gatt.connect()` first (the fast path when the OS
+ * still holds the link, e.g. a Pod that no longer advertises), and otherwise waits
+ * for the Pod to advertise and connects then — so a Pod that is asleep or out of
+ * range costs nothing until it reappears, and a failed connect simply waits for the
+ * next advertisement rather than giving up. Scanning runs only while disconnected.
+ *
+ * Without `watchAdvertisements` (unsupported or behind an experimental flag) there
+ * is no way to notice the Pod reappear, so the loop ends and the app falls back to a
+ * manual Connect or a future reload.
+ */
+async function superviseDevice(
   device: BluetoothDevice,
   onReconnect: (conn: PodConnection) => void,
   options?: ConnectOptions,
 ): Promise<void> {
-  // Fast path: the OS may still hold the link, so a direct connect just works.
-  try {
-    onReconnect(await PodConnection.fromDevice(device, options));
-    return;
-  } catch {
-    // Not immediately reachable — fall through and wait for the Pod to advertise.
-  }
-
-  if (typeof device.watchAdvertisements !== 'function') return;
-
-  // Stop scanning as soon as the Pod shows up (the current API stops via AbortSignal).
-  const scan = new AbortController();
-  device.addEventListener(
-    'advertisementreceived',
-    async () => {
-      scan.abort();
-      try {
-        onReconnect(await PodConnection.fromDevice(device, options));
-      } catch (err) {
-        // In range but the connect still failed — leave it for a manual Connect.
-        console.warn(`Pod reconnect failed for ${device.name ?? device.id}`, err);
+  for (;;) {
+    if (!device.gatt?.connected) {
+      const conn = await tryConnect(device, options);
+      if (!conn) {
+        // Not reachable now: wait for the Pod to advertise, then loop and retry.
+        if (!(await waitForAdvertisement(device))) return;
+        continue;
       }
-    },
-    { once: true, signal: scan.signal },
-  );
+      onReconnect(conn);
+    }
+    // Linked (just now or already): sit until it drops, then loop to re-establish.
+    await disconnected(device);
+  }
+}
 
+/** Bring the link up if the Pod is reachable right now; null if it is not. */
+async function tryConnect(
+  device: BluetoothDevice,
+  options?: ConnectOptions,
+): Promise<PodConnection | null> {
+  try {
+    return await PodConnection.fromDevice(device, options);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Scan until the Pod advertises, then stop. Resolves true once it appears, false
+ * when scanning is unavailable (so the caller can stop supervising this device).
+ */
+async function waitForAdvertisement(device: BluetoothDevice): Promise<boolean> {
+  if (typeof device.watchAdvertisements !== 'function') return false;
+
+  const scan = new AbortController();
+  const seen = new Promise<void>((resolve) => {
+    device.addEventListener('advertisementreceived', () => resolve(), {
+      once: true,
+      signal: scan.signal,
+    });
+  });
   try {
     await device.watchAdvertisements({ signal: scan.signal });
   } catch {
     // Scanning is unsupported or blocked (needs an experimental flag on some builds).
     scan.abort();
+    return false;
   }
+  await seen;
+  scan.abort(); // stop scanning now that the Pod is in range
+  return true;
+}
+
+/** Resolve when the device's link drops (or at once if it is already down). */
+function disconnected(device: BluetoothDevice): Promise<void> {
+  return new Promise((resolve) => {
+    if (!device.gatt?.connected) {
+      resolve();
+      return;
+    }
+    device.addEventListener('gattserverdisconnected', () => resolve(), { once: true });
+  });
 }

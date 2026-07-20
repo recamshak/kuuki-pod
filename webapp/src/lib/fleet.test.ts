@@ -312,6 +312,30 @@ describe('Fleet — disconnect', () => {
     expect(fleet.selectedHistory?.samples().map((s) => s.co2)).toEqual([700]);
     expect(state.count).toBe(1);
   });
+
+  it('re-links a dropped Pod from a fresh connection without duplicating knownPodIds', async () => {
+    // The transport re-delivers a brand-new PodConnection for the same Pod after a
+    // drop (persistent pairing); Fleet must re-register it, not accrete a duplicate.
+    let deliver!: (conn: PodConnectionLike) => void;
+    const first = new FakeConnection('pod-x', [rec(900, 700)]);
+    const fleet = new Fleet(
+      makeDeps({
+        connectPod: () => Promise.resolve(first),
+        reconnectPods: (onReconnect) => (deliver = onReconnect),
+      }),
+    );
+    await fleet.connect();
+    first.drop();
+    expect(fleet.connected).toBe(false);
+
+    const again = new FakeConnection('pod-x', [rec(900, 700)]);
+    await deliver(again);
+
+    expect(fleet.connected).toBe(true);
+    expect(fleet.selectedPodId).toBe('pod-x');
+    expect(fleet.knownPodIds).toEqual(['pod-x']);
+    expect(again.syncCalls).toBe(1);
+  });
 });
 
 describe('Fleet — reconnect loop', () => {
