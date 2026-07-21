@@ -46,6 +46,12 @@
     deleteHistory,
   });
 
+  // Per-Pod human-readable labels (names.ts), built alongside the Fleet with the same
+  // production localStorage. Resolving a name reads localStorage, which Svelte can't
+  // track, so a rename/first-name bumps `namesVersion` to recompute the picker list.
+  const names = new Names({ store: localStorage });
+  let namesVersion = $state(0);
+
   // Map Fleet's two change signals to two $state counters. Only the History counter
   // feeds the chart's $derived, so a Live reading refreshes the hero number without
   // rebuilding the chart or resetting uPlot's zoom.
@@ -53,6 +59,19 @@
   let stateVersion = $state(0); // bumps on selection/connection/live/busy/error
   fleet.onHistoryChange = () => historyVersion++;
   fleet.onStateChange = () => stateVersion++;
+
+  // First-connect naming: the one time a genuinely new Pod registers, prompt for a
+  // name. Fleet fires this exactly once per new Pod (never on reload of a persisted-
+  // but-unnamed Pod), so a plain prompt here is enough; guard on hasName so a Pod the
+  // user already named some other way is left alone.
+  fleet.onNewPod = (id) => {
+    if (names.hasName(id)) return;
+    const answer = window.prompt("Name this Pod");
+    if (answer) {
+      names.setName(id, answer);
+      namesVersion++;
+    }
+  };
 
   let range = $state<Range>(RANGES[1]); // default to 24h
   let showTemp = $state(false);
@@ -70,13 +89,9 @@
   const selectedHistory = $derived.by(tracked(() => fleet.selectedHistory));
   const live = $derived.by(tracked(() => fleet.live));
   const connected = $derived.by(tracked(() => fleet.connected));
-  const busy = $derived.by(tracked(() => fleet.busy));
+  const syncing = $derived.by(tracked(() => fleet.syncing));
   const error = $derived.by(tracked(() => fleet.error));
 
-  // Per-Pod human-readable labels (names.ts). Resolving a name reads localStorage,
-  // which Svelte can't track, so a rename bumps `namesVersion` to recompute the list.
-  const names = new Names();
-  let namesVersion = $state(0);
   const pickerPods = $derived.by<PickerPod[]>(() => {
     namesVersion; // establish the dependency: recompute after a rename
     return fleetPods.map((p) => ({
@@ -89,7 +104,7 @@
   // Rename lives in the parent (the picker only emits the intent, ticket 12e/12f):
   // prompt seeded with the current label, persist a non-blank answer, and recompute.
   function renamePod(id: string): void {
-    const answer = window.prompt("Name this Pod", names.getName(id));
+    const answer = window.prompt("Rename Pod", names.getName(id));
     if (answer === null) return; // cancelled
     names.setName(id, answer);
     namesVersion++;
@@ -134,31 +149,31 @@
     </p>
   {/if}
 
-  <section class="hero" style={band ? `--band: ${band.color}` : undefined}>
+  <section
+    class="hero"
+    class:stale={!connected}
+    style={band ? `--band: ${band.color}` : undefined}
+  >
+    {#if syncing}
+      <span class="sync" title="Syncing…" aria-label="Syncing">
+        <span class="spinner" aria-hidden="true"></span>
+      </span>
+    {/if}
     <div class="co2">
       <span class="value">{co2Text}</span>
       <span class="unit">ppm CO₂</span>
     </div>
-    {#if band}
+    {#if !connected}
+      <span class="verdict muted">Not connected</span>
+    {:else if band}
       <span class="verdict">{band.label}</span>
     {:else}
-      <span class="verdict muted"
-        >{connected ? "Waiting for a reading…" : "Not connected"}</span
-      >
+      <span class="verdict muted">Waiting for a reading…</span>
     {/if}
     <div class="secondary">
       <span>{tempText}</span>
       <span>{humidityText} RH</span>
     </div>
-  </section>
-
-  <section class="controls">
-    <button onclick={() => fleet.connect()} disabled={!supported || busy}>
-      {busy ? "Working…" : "Connect a Pod"}
-    </button>
-    {#if connected}
-      <button onclick={() => fleet.sync()} disabled={busy}>Sync</button>
-    {/if}
   </section>
 
   {#if error}
@@ -187,7 +202,7 @@
       />
     {:else}
       <p class="notice muted">
-        No history yet — Connect a Pod and Sync to build the chart.
+        No history yet — connect a Pod to build the chart.
       </p>
     {/if}
   </section>
@@ -211,6 +226,7 @@
 
   .hero {
     --band: #8b949e;
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -219,6 +235,35 @@
     background: #0f141b;
     border: 1px solid #21262d;
     border-radius: 14px;
+  }
+
+  /* Disconnected: the last reading stays on screen but visibly stale. */
+  .hero.stale .co2,
+  .hero.stale .secondary {
+    opacity: 0.4;
+  }
+
+  /* Small spinner in the hero corner, only while the selected Pod is mid-sync. */
+  .sync {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    display: inline-flex;
+  }
+
+  .spinner {
+    width: 0.9rem;
+    height: 0.9rem;
+    border: 2px solid #30363d;
+    border-top-color: #58a6ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .co2 {
@@ -254,12 +299,6 @@
     margin-top: 0.4rem;
     opacity: 0.75;
     font-variant-numeric: tabular-nums;
-  }
-
-  .controls {
-    display: flex;
-    gap: 0.75rem;
-    justify-content: center;
   }
 
   button {
