@@ -213,10 +213,24 @@ export function connectPod(options?: ConnectOptions): Promise<PodConnection> {
 }
 
 /**
+ * Stop supervising a Pod and revoke its Web Bluetooth grant. Delivered to the
+ * caller alongside each reconnected `PodConnection` (keyed there by `podId`) so a
+ * "forget Pod" flow can permanently unlink one device: it aborts the supervision
+ * loop (so the Pod stops scanning/reconnecting at once) and calls `device.forget()`
+ * where available, so the Pod is gone for this session and after the next reload.
+ */
+export type ForgetHandle = () => Promise<void>;
+
+/**
  * Keep every Pod permitted in an earlier session linked, with no user gesture,
- * calling `onReconnect` with a fresh connection each time one comes up — on load
- * and again after every drop. Web Bluetooth remembers devices granted through
- * `requestDevice()`; after a reload `getDevices()` returns them.
+ * calling `onReconnect` with a fresh connection — and a per-Pod `forget` handle —
+ * each time one comes up, on load and again after every drop. Web Bluetooth
+ * remembers devices granted through `requestDevice()`; after a reload `getDevices()`
+ * returns them.
+ *
+ * The `forget` handle is stable across a Pod's reconnects (it aborts that one
+ * device's supervision loop), so a caller can retain it keyed by `podId` and later
+ * stop supervising even while the Pod is disconnected and merely being scanned for.
  *
  * `getDevices()` is Chrome-only, so elsewhere this is a no-op and the app falls
  * back to the manual Connect button. A fresh connection re-delivered for a Pod the
@@ -224,7 +238,7 @@ export function connectPod(options?: ConnectOptions): Promise<PodConnection> {
  * localStorage (history.ts), so nothing accumulated is lost across a reconnect.
  */
 export async function reconnectPods(
-  onReconnect: (conn: PodConnection) => void,
+  onReconnect: (conn: PodConnection, forget: ForgetHandle) => void,
   options?: ConnectOptions,
 ): Promise<void> {
   const bluetooth = navigator.bluetooth;
@@ -235,8 +249,9 @@ export async function reconnectPods(
 }
 
 /**
- * Keep one restored device linked for as long as the app runs. The loop only ever
- * does one of two things: bring the link up when it is down, or wait for it to drop.
+ * Keep one restored device linked for as long as the app runs (or until it is
+ * forgotten). The loop only ever does one of two things: bring the link up when it
+ * is down, or wait for it to drop.
  *
  * Bringing it up tries a direct `gatt.connect()` first (the fast path when the OS
  * still holds the link, e.g. a Pod that no longer advertises), and otherwise waits
@@ -244,27 +259,36 @@ export async function reconnectPods(
  * range costs nothing until it reappears, and a failed connect simply waits for the
  * next advertisement rather than giving up. Scanning runs only while disconnected.
  *
+ * A per-device `AbortController` is the stop switch: the `forget` handle handed to
+ * `onReconnect` aborts it, which breaks the loop and cancels any in-flight scan or
+ * disconnected-wait, so a forgotten Pod stops scanning/reconnecting immediately.
+ *
  * Without `watchAdvertisements` (unsupported or behind an experimental flag) there
  * is no way to notice the Pod reappear, so the loop ends and the app falls back to a
  * manual Connect or a future reload.
  */
 async function superviseDevice(
   device: BluetoothDevice,
-  onReconnect: (conn: PodConnection) => void,
+  onReconnect: (conn: PodConnection, forget: ForgetHandle) => void,
   options?: ConnectOptions,
 ): Promise<void> {
-  for (;;) {
+  const supervision = new AbortController();
+  const { signal } = supervision;
+  const forget: ForgetHandle = () => forgetDevice(device, supervision);
+
+  while (!signal.aborted) {
     if (!device.gatt?.connected) {
       const conn = await tryConnect(device, options);
+      if (signal.aborted) return; // forgotten mid-connect: drop the fresh link on the floor
       if (!conn) {
         // Not reachable now: wait for the Pod to advertise, then loop and retry.
-        if (!(await waitForAdvertisement(device))) return;
+        if (!(await waitForAdvertisement(device, signal))) return;
         continue;
       }
-      onReconnect(conn);
+      onReconnect(conn, forget);
     }
     // Linked (just now or already): sit until it drops, then loop to re-establish.
-    await disconnected(device);
+    await disconnected(device, signal);
   }
 }
 
@@ -281,38 +305,84 @@ async function tryConnect(
 }
 
 /**
- * Scan until the Pod advertises, then stop. Resolves true once it appears, false
- * when scanning is unavailable (so the caller can stop supervising this device).
+ * Scan until the Pod advertises, then stop. Resolves true once it appears; false
+ * when scanning is unavailable or the external `signal` aborts (the Pod was
+ * forgotten mid-scan) — either way the caller stops supervising this device.
  */
-async function waitForAdvertisement(device: BluetoothDevice): Promise<boolean> {
-  if (typeof device.watchAdvertisements !== 'function') return false;
+async function waitForAdvertisement(
+  device: BluetoothDevice,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (typeof device.watchAdvertisements !== 'function' || signal.aborted) return false;
 
   const scan = new AbortController();
-  const seen = new Promise<void>((resolve) => {
-    device.addEventListener('advertisementreceived', () => resolve(), {
-      once: true,
-      signal: scan.signal,
-    });
-  });
   try {
     await device.watchAdvertisements({ signal: scan.signal });
   } catch {
     // Scanning is unsupported or blocked (needs an experimental flag on some builds).
-    scan.abort();
     return false;
   }
-  await seen;
-  scan.abort(); // stop scanning now that the Pod is in range
+  try {
+    await new Promise<void>((resolve, reject) => {
+      // Aborted while `watchAdvertisements` was starting up: an `abort` listener
+      // added now would never fire, so bail before we register one and hang.
+      if (signal.aborted) {
+        reject(new DOMException('aborted', 'AbortError'));
+        return;
+      }
+      device.addEventListener('advertisementreceived', () => resolve(), {
+        once: true,
+        signal: scan.signal,
+      });
+      // Forgetting the Pod aborts supervision: end the scan without waiting for range.
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+        once: true,
+        signal: scan.signal,
+      });
+    });
+  } catch {
+    return false; // forgotten mid-scan: stop supervising this device
+  } finally {
+    scan.abort(); // stop scanning and drop both listeners
+  }
   return true;
 }
 
-/** Resolve when the device's link drops (or at once if it is already down). */
-function disconnected(device: BluetoothDevice): Promise<void> {
+/**
+ * Resolve when the device's link drops, when supervision is aborted (the Pod was
+ * forgotten), or at once if it is already down. Either resolution returns the loop
+ * to its top, where the aborted signal ends it.
+ */
+function disconnected(device: BluetoothDevice, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    if (!device.gatt?.connected) {
+    if (signal.aborted || !device.gatt?.connected) {
       resolve();
       return;
     }
-    device.addEventListener('gattserverdisconnected', () => resolve(), { once: true });
+    // Bind both listeners to `done` so the first to fire removes the other.
+    const done = new AbortController();
+    const settle = () => {
+      done.abort();
+      resolve();
+    };
+    device.addEventListener('gattserverdisconnected', settle, { once: true, signal: done.signal });
+    signal.addEventListener('abort', settle, { once: true, signal: done.signal });
   });
+}
+
+/**
+ * Revoke a Pod's grant and stop supervising it (ticket 12c): abort its supervision
+ * loop — which cancels any in-flight scan or disconnected-wait, so the Pod stops
+ * scanning/reconnecting at once — drop the GATT link, and, where the browser
+ * supports it, call `device.forget()` so it is no longer returned by `getDevices()`
+ * after the next reload. `device.forget()` is Chrome-only, so it is guarded and a
+ * no-op elsewhere (the loop still stops for the rest of the session).
+ */
+async function forgetDevice(
+  device: BluetoothDevice,
+  supervision: AbortController,
+): Promise<void> {
+  supervision.abort();
+  device.gatt?.disconnect();
+  if (typeof device.forget === 'function') await device.forget();
 }
