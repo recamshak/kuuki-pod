@@ -168,6 +168,17 @@ export function listPodIds(store?: EnumerableKeyValueStore): string[] {
 }
 
 /**
+ * Remove a Pod's persisted History from `store`, so "forget Pod" can wipe its
+ * stored data (ticket 12). Companion to `listPodIds`: after this, `listPodIds`
+ * no longer lists `podId` and every other Pod's History is untouched. Defaults
+ * to the ambient `localStorage`; idempotent and a no-op when absent or unstored.
+ */
+export function deleteHistory(podId: string, store?: KeyValueStore): void {
+  const s = store ?? (globalThis as { localStorage?: KeyValueStore }).localStorage;
+  s?.removeItem(KEY_PREFIX + podId);
+}
+
+/**
  * Fold a Sync's decoded records into `history`, in place.
  *
  * Each record is placed on the wall clock at `t = nowMs − age × 1000`, where
