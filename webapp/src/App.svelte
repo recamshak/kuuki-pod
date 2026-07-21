@@ -12,6 +12,7 @@
    *   - Per-Pod History → uPlot timeseries over a selectable range.
    */
   import Chart from "./lib/Chart.svelte";
+  import PodPicker, { type PickerPod } from "./lib/PodPicker.svelte";
   import {
     co2Band,
     RANGES,
@@ -22,6 +23,7 @@
   } from "./lib/dashboard";
   import { deleteHistory, History, listPodIds } from "./lib/history";
   import { Fleet } from "./lib/fleet";
+  import { Names } from "./lib/names";
   import { connectPod, reconnectPods } from "./lib/transport";
 
   const supported =
@@ -63,13 +65,35 @@
     stateVersion; // touch the state signal to establish the reactive dependency
     return read();
   };
-  const knownPodIds = $derived.by(tracked(() => fleet.knownPodIds));
+  const fleetPods = $derived.by(tracked(() => fleet.pods));
   const selectedPodId = $derived.by(tracked(() => fleet.selectedPodId));
   const selectedHistory = $derived.by(tracked(() => fleet.selectedHistory));
   const live = $derived.by(tracked(() => fleet.live));
   const connected = $derived.by(tracked(() => fleet.connected));
   const busy = $derived.by(tracked(() => fleet.busy));
   const error = $derived.by(tracked(() => fleet.error));
+
+  // Per-Pod human-readable labels (names.ts). Resolving a name reads localStorage,
+  // which Svelte can't track, so a rename bumps `namesVersion` to recompute the list.
+  const names = new Names();
+  let namesVersion = $state(0);
+  const pickerPods = $derived.by<PickerPod[]>(() => {
+    namesVersion; // establish the dependency: recompute after a rename
+    return fleetPods.map((p) => ({
+      id: p.id,
+      name: names.getName(p.id),
+      connected: p.connected,
+    }));
+  });
+
+  // Rename lives in the parent (the picker only emits the intent, ticket 12e/12f):
+  // prompt seeded with the current label, persist a non-blank answer, and recompute.
+  function renamePod(id: string): void {
+    const answer = window.prompt("Name this Pod", names.getName(id));
+    if (answer === null) return; // cancelled
+    names.setName(id, answer);
+    namesVersion++;
+  }
 
   const band = $derived(live ? co2Band(live.co2) : null);
 
@@ -91,17 +115,17 @@
 
 <main>
   <header>
-    {#if knownPodIds.length > 1}
-      <select
-        value={selectedPodId}
-        onchange={(e) => fleet.select(e.currentTarget.value)}
-        aria-label="Pod"
-      >
-        {#each knownPodIds as id (id)}
-          <option value={id}>{id.slice(0, 8)}</option>
-        {/each}
-      </select>
-    {/if}
+    <PodPicker
+      pods={pickerPods}
+      selectedId={selectedPodId}
+      onSelect={(id) => fleet.select(id)}
+      onConnect={() => fleet.connect()}
+      onForget={(id) => {
+        fleet.remove(id);
+        names.forget(id);
+      }}
+      onRename={renamePod}
+    />
   </header>
 
   {#if !supported}
@@ -183,14 +207,6 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 1rem;
-  }
-
-  select {
-    background: #161b22;
-    color: #e6edf3;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 0.25rem 0.5rem;
   }
 
   .hero {
