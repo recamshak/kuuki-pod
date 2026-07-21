@@ -19,7 +19,7 @@ The webapp's per-Pod localStorage copy of Samples, keyed by Pod ID and built up 
 _Avoid_: log, archive
 
 **Fleet**:
-The set of Pods the webapp currently knows about — connected or merely persisted — keyed by Pod ID, together with which one is selected. The webapp-side counterpart to the multi-Pod world; owns selection, Live-reading fan-in, and the Pod connection lifecycle.
+The set of Pods the webapp currently knows about — connected or merely persisted — keyed by Pod ID, together with which one is selected. The webapp-side counterpart to the multi-Pod world; owns selection, Live-reading fan-in, and the Pod connection lifecycle. Exposes a per-Pod view (`pods`: `{ id, connected, syncing }` over every known Pod) for the picker and per-Pod `syncing` (distinct from the shared user-`busy`) for the hero. A 60 s **auto-sync** loop and the on-reconnect Sync are *background* Syncs: they toggle `syncing` and fire the History change, but never set `busy` and never surface an error (they self-heal next tick). The selected Pod ID is persisted and restored on reload even while disconnected (a restored choice wins over the auto-select-the-sole-Pod rule); `onNewPod` fires once when a Pod not persisted at startup first registers (for naming), and `remove()` forgets a Pod for good — stop supervision + revoke grant (transport), delete its History, drop it from every map, re-select another. Everything arrives through an injected `FleetDeps` (no Web Bluetooth, localStorage, DOM, or timers), so the whole engine is a pure, tested seam (ADR-0004).
 _Avoid_: registry, store, list
 
 **Sample**:

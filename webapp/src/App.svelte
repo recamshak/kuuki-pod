@@ -20,7 +20,7 @@
     type PlotData,
     type Range,
   } from "./lib/dashboard";
-  import { History, listPodIds } from "./lib/history";
+  import { deleteHistory, History, listPodIds } from "./lib/history";
   import { Fleet } from "./lib/fleet";
   import { connectPod, reconnectPods } from "./lib/transport";
 
@@ -28,13 +28,20 @@
     typeof navigator !== "undefined" && "bluetooth" in navigator;
 
   // The Fleet owns the whole multi-Pod lifecycle behind its tested interface. Wire it
-  // with production FleetDeps: the real transport/history functions, and a no-op
-  // reconnect where Web Bluetooth is absent (the real one reaches for navigator).
+  // with production FleetDeps: the real transport/history functions, a no-op reconnect
+  // where Web Bluetooth is absent (the real one reaches for navigator), the ambient
+  // timer for the auto-sync loop, and localStorage for selection persistence.
   const fleet = new Fleet({
     connectPod,
     reconnectPods: supported ? reconnectPods : () => {},
     listPodIds,
     makeHistory: (id) => new History(id),
+    schedule: (cb, everyMs) => {
+      const handle = setInterval(cb, everyMs);
+      return () => clearInterval(handle);
+    },
+    selectionStore: localStorage,
+    deleteHistory,
   });
 
   // Map Fleet's two change signals to two $state counters. Only the History counter

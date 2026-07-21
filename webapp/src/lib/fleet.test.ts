@@ -46,6 +46,8 @@ class FakeConnection implements PodConnectionLike {
 
   syncCalls = 0;
   disconnectCalls = 0;
+  /** When set, sync() rejects with this instead of Merging (drives error paths). */
+  syncError: Error | null = null;
 
   constructor(
     readonly podId: string,
@@ -59,6 +61,7 @@ class FakeConnection implements PodConnectionLike {
 
   sync(): Promise<void> {
     this.syncCalls++;
+    if (this.syncError) return Promise.reject(this.syncError);
     applySync(this.history, this.batch, T0 + this.syncCalls * 900_000);
     return Promise.resolve();
   }
@@ -85,6 +88,34 @@ function counter() {
   return { fire: () => void count++, get count() { return count; } };
 }
 
+/**
+ * A hand-driven scheduler double: captures the callback Fleet registers for its
+ * auto-sync loop so a test can `tick()` it by hand instead of waiting 60 s of
+ * wall-clock. `cancel()` records that Fleet released the schedule.
+ */
+function fakeScheduler() {
+  let cb: (() => void) | null = null;
+  let everyMs = 0;
+  let cancelled = false;
+  return {
+    schedule: (fn: () => void, ms: number) => {
+      cb = fn;
+      everyMs = ms;
+      return () => {
+        cancelled = true;
+      };
+    },
+    /** Fire one auto-sync tick. */
+    tick: () => cb?.(),
+    get everyMs() {
+      return everyMs;
+    },
+    get cancelled() {
+      return cancelled;
+    },
+  };
+}
+
 /** Build FleetDeps with sensible no-op defaults; override per test. */
 function makeDeps(overrides: Partial<FleetDeps> = {}): FleetDeps {
   return {
@@ -92,6 +123,9 @@ function makeDeps(overrides: Partial<FleetDeps> = {}): FleetDeps {
     reconnectPods: () => {},
     listPodIds: () => [],
     makeHistory: (id) => new History(id, { store: new FakeStore() }),
+    schedule: () => () => {},
+    selectionStore: new FakeStore(),
+    deleteHistory: () => {},
     ...overrides,
   };
 }
@@ -419,5 +453,334 @@ describe('Fleet — select', () => {
 
     fleet.select('pod-a'); // already selected: no signal
     expect(state.count).toBe(1);
+  });
+});
+
+describe('Fleet — per-Pod view (pods)', () => {
+  it('lists every known Pod with its connected and syncing flags', async () => {
+    const a = new FakeConnection('pod-a');
+    const b = new FakeConnection('pod-b');
+    const conns = [a, b];
+    let i = 0;
+    const fleet = new Fleet(
+      makeDeps({
+        listPodIds: () => ['pod-persisted'],
+        connectPod: () => Promise.resolve(conns[i++]),
+      }),
+    );
+
+    await fleet.connect(); // pod-a connects
+    await fleet.connect(); // pod-b connects
+
+    const byId = new Map(fleet.pods.map((p) => [p.id, p]));
+    expect(new Set(byId.keys())).toEqual(new Set(['pod-persisted', 'pod-a', 'pod-b']));
+    expect(byId.get('pod-persisted')).toEqual({ id: 'pod-persisted', connected: false, syncing: false });
+    expect(byId.get('pod-a')).toEqual({ id: 'pod-a', connected: true, syncing: false });
+    expect(byId.get('pod-b')).toEqual({ id: 'pod-b', connected: true, syncing: false });
+  });
+});
+
+describe('Fleet — per-Pod syncing', () => {
+  it('toggles the selected Pod syncing around a sync and fires onStateChange on both edges', async () => {
+    let resolveSync!: () => void;
+    const conn = new FakeConnection('pod-x');
+    conn.sync = () => {
+      conn.syncCalls++;
+      return new Promise<void>((r) => (resolveSync = () => r()));
+    };
+    const fleet = new Fleet(makeDeps({ connectPod: () => Promise.resolve(conn) }));
+
+    const state = counter();
+    fleet.onStateChange = state.fire;
+
+    const pending = fleet.connect();
+    await Promise.resolve(); // let connectPod resolve and the sync begin
+    await Promise.resolve();
+    expect(fleet.syncing).toBe(true); // sync in flight for the selected Pod
+    const before = state.count;
+
+    resolveSync();
+    await pending;
+
+    expect(fleet.syncing).toBe(false);
+    expect(state.count).toBeGreaterThan(before); // a transition off fired a state change
+  });
+});
+
+describe('Fleet — auto-sync', () => {
+  it('syncs every connected Pod on a tick and fires onHistoryChange per Merge', async () => {
+    const clock = fakeScheduler();
+    const a = new FakeConnection('pod-a', [rec(900, 600)]);
+    const b = new FakeConnection('pod-b', [rec(900, 700)]);
+    const conns = [a, b];
+    let i = 0;
+    const fleet = new Fleet(
+      makeDeps({ connectPod: () => Promise.resolve(conns[i++]), schedule: clock.schedule }),
+    );
+    await fleet.connect();
+    await fleet.connect();
+    expect(a.syncCalls).toBe(1);
+    expect(b.syncCalls).toBe(1);
+
+    const history = counter();
+    fleet.onHistoryChange = history.fire;
+
+    clock.tick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(a.syncCalls).toBe(2);
+    expect(b.syncCalls).toBe(2);
+    expect(history.count).toBe(2); // one Merge per connected Pod
+  });
+
+  it('registers the schedule at a 60 s cadence', () => {
+    const clock = fakeScheduler();
+    new Fleet(makeDeps({ schedule: clock.schedule }));
+    expect(clock.everyMs).toBe(60_000);
+  });
+
+  it('skips a Pod already syncing (no overlapping sync)', async () => {
+    const clock = fakeScheduler();
+    let resolveFirst!: () => void;
+    const conn = new FakeConnection('pod-x');
+    // First sync blocks; a second overlapping sync must not be issued by the tick.
+    conn.sync = () => {
+      conn.syncCalls++;
+      if (conn.syncCalls === 1) return new Promise<void>((r) => (resolveFirst = () => r()));
+      return Promise.resolve();
+    };
+    const fleet = new Fleet(
+      makeDeps({ connectPod: () => Promise.resolve(conn), schedule: clock.schedule }),
+    );
+
+    const pending = fleet.connect(); // sync #1 in flight, pod-x is syncing
+    await Promise.resolve(); // let connectPod resolve and the sync begin
+    await Promise.resolve();
+    expect(fleet.syncing).toBe(true);
+
+    clock.tick(); // must skip pod-x — it is already syncing
+    expect(conn.syncCalls).toBe(1);
+
+    resolveFirst();
+    await pending;
+    expect(conn.syncCalls).toBe(1);
+  });
+
+  it('does not set busy, does not surface an error, and keeps looping when a background sync throws', async () => {
+    const clock = fakeScheduler();
+    const conn = new FakeConnection('pod-x', [rec(900, 700)]);
+    const fleet = new Fleet(
+      makeDeps({ connectPod: () => Promise.resolve(conn), schedule: clock.schedule }),
+    );
+    await fleet.connect();
+
+    const state = counter();
+    fleet.onHistoryChange = counter().fire;
+    fleet.onStateChange = state.fire;
+
+    conn.syncError = new Error('background boom');
+    clock.tick();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fleet.busy).toBe(false);
+    expect(fleet.error).toBeNull(); // background failure is swallowed
+    expect(fleet.syncing).toBe(false); // syncing cleared even though the sync threw
+
+    conn.syncError = null;
+    clock.tick();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(conn.syncCalls).toBe(3); // connect + failed tick + healthy tick: loop continues
+  });
+});
+
+describe('Fleet — reconnect sync is a background sync', () => {
+  it('does not set busy and swallows a reconnect sync error', async () => {
+    let deliver!: (conn: PodConnectionLike) => void;
+    const fleet = new Fleet(
+      makeDeps({ reconnectPods: (onReconnect) => (deliver = onReconnect) }),
+    );
+
+    const conn = new FakeConnection('pod-1');
+    conn.syncError = new Error('reconnect boom');
+    await deliver(conn);
+    // let the swallowed background sync settle
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fleet.busy).toBe(false);
+    expect(fleet.error).toBeNull();
+    expect(fleet.connected).toBe(true); // still registered despite the failed sync
+  });
+});
+
+describe('Fleet — selection persistence', () => {
+  it('persists the selected Pod id via the injected store on select', async () => {
+    const selectionStore = new FakeStore();
+    const a = new FakeConnection('pod-a');
+    const b = new FakeConnection('pod-b');
+    const conns = [a, b];
+    let i = 0;
+    const fleet = new Fleet(
+      makeDeps({ connectPod: () => Promise.resolve(conns[i++]), selectionStore }),
+    );
+    await fleet.connect();
+    await fleet.connect();
+
+    fleet.select('pod-a');
+    // Reload with the same store: the selection is restored even before any connection.
+    const reloaded = new Fleet(
+      makeDeps({ listPodIds: () => ['pod-a', 'pod-b'], selectionStore }),
+    );
+    expect(reloaded.selectedPodId).toBe('pod-a');
+  });
+
+  it('restores a persisted selection whose Pod is disconnected, still showing its History', () => {
+    const selectionStore = new FakeStore();
+    selectionStore.setItem('kuuki:selected', 'pod-b');
+    const store = new FakeStore();
+    applySync(new History('pod-b', { store }), [rec(900, 640)], T0);
+
+    const fleet = new Fleet(
+      makeDeps({
+        listPodIds: () => ['pod-a', 'pod-b'],
+        makeHistory: (id) => new History(id, { store }),
+        selectionStore,
+      }),
+    );
+
+    expect(fleet.selectedPodId).toBe('pod-b');
+    expect(fleet.connected).toBe(false);
+    expect(fleet.selectedHistory?.samples().map((s) => s.co2)).toEqual([640]);
+  });
+
+  it('a restored persisted selection wins over the sole-Pod auto-select', () => {
+    const selectionStore = new FakeStore();
+    selectionStore.setItem('kuuki:selected', 'pod-b');
+    const fleet = new Fleet(
+      makeDeps({ listPodIds: () => ['pod-a', 'pod-b'], selectionStore }),
+    );
+    expect(fleet.selectedPodId).toBe('pod-b');
+  });
+
+  it('a reconnect does not steal selection from a restored persisted choice', async () => {
+    let deliver!: (conn: PodConnectionLike) => void;
+    const selectionStore = new FakeStore();
+    selectionStore.setItem('kuuki:selected', 'pod-b');
+    const fleet = new Fleet(
+      makeDeps({
+        listPodIds: () => ['pod-a', 'pod-b'],
+        reconnectPods: (onReconnect) => (deliver = onReconnect),
+        selectionStore,
+      }),
+    );
+    expect(fleet.selectedPodId).toBe('pod-b');
+
+    await deliver(new FakeConnection('pod-a', [rec(900, 600)])); // the other Pod comes up first
+    expect(fleet.selectedPodId).toBe('pod-b'); // restored choice is not stolen
+  });
+});
+
+describe('Fleet — new-Pod signal', () => {
+  it('fires onNewPod once for a Pod absent from the startup persisted set', async () => {
+    let deliver!: (conn: PodConnectionLike) => void;
+    const fleet = new Fleet(
+      makeDeps({ reconnectPods: (onReconnect) => (deliver = onReconnect) }),
+    );
+    const seen: string[] = [];
+    fleet.onNewPod = (id) => seen.push(id);
+
+    const conn = new FakeConnection('pod-new');
+    await deliver(conn);
+    expect(seen).toEqual(['pod-new']);
+
+    conn.drop();
+    await deliver(new FakeConnection('pod-new')); // reconnect of the same Pod
+    expect(seen).toEqual(['pod-new']); // still once
+  });
+
+  it('does not fire onNewPod for a persisted Pod reconnecting on reload', async () => {
+    let deliver!: (conn: PodConnectionLike) => void;
+    const fleet = new Fleet(
+      makeDeps({
+        listPodIds: () => ['pod-known'],
+        reconnectPods: (onReconnect) => (deliver = onReconnect),
+      }),
+    );
+    const seen: string[] = [];
+    fleet.onNewPod = (id) => seen.push(id);
+
+    await deliver(new FakeConnection('pod-known'));
+    expect(seen).toEqual([]);
+  });
+
+  it('fires onNewPod for a manually connected new Pod', async () => {
+    const conn = new FakeConnection('pod-x');
+    const fleet = new Fleet(makeDeps({ connectPod: () => Promise.resolve(conn) }));
+    const seen: string[] = [];
+    fleet.onNewPod = (id) => seen.push(id);
+
+    await fleet.connect();
+    expect(seen).toEqual(['pod-x']);
+  });
+});
+
+describe('Fleet — remove', () => {
+  it('stops supervision, disconnects, deletes History, drops all state, and re-selects', async () => {
+    let deliver!: (conn: PodConnectionLike, forget: () => Promise<void>) => void;
+    const deleted: string[] = [];
+    const fleet = new Fleet(
+      makeDeps({
+        reconnectPods: (onReconnect) =>
+          (deliver = onReconnect as (c: PodConnectionLike, f: () => Promise<void>) => void),
+        deleteHistory: (id) => deleted.push(id),
+      }),
+    );
+
+    let forgot = false;
+    const a = new FakeConnection('pod-a', [rec(900, 600)]);
+    const b = new FakeConnection('pod-b', [rec(900, 700)]);
+    await deliver(a, () => {
+      forgot = true;
+      return Promise.resolve();
+    });
+    await deliver(b, () => Promise.resolve());
+    fleet.select('pod-a');
+    expect(fleet.selectedPodId).toBe('pod-a');
+
+    const state = counter();
+    fleet.onStateChange = state.fire;
+
+    await fleet.remove('pod-a');
+
+    expect(forgot).toBe(true); // supervision stopped + grant revoked via injected forget
+    expect(deleted).toEqual(['pod-a']); // persisted History wiped
+    expect(fleet.knownPodIds).toEqual(['pod-b']); // dropped from the known set
+    expect(fleet.pods.map((p) => p.id)).toEqual(['pod-b']);
+    expect(fleet.selectedPodId).toBe('pod-b'); // re-selected another Pod
+    expect(state.count).toBeGreaterThan(0);
+  });
+
+  it('disconnects a Pod with no supervision handle and leaves selection null when it was the only Pod', async () => {
+    const deleted: string[] = [];
+    const conn = new FakeConnection('pod-only');
+    const fleet = new Fleet(
+      makeDeps({
+        connectPod: () => Promise.resolve(conn),
+        deleteHistory: (id) => deleted.push(id),
+      }),
+    );
+    await fleet.connect();
+    expect(fleet.selectedPodId).toBe('pod-only');
+
+    await fleet.remove('pod-only');
+
+    expect(conn.disconnectCalls).toBe(1);
+    expect(deleted).toEqual(['pod-only']);
+    expect(fleet.knownPodIds).toEqual([]);
+    expect(fleet.selectedPodId).toBeNull();
+    expect(fleet.selectedHistory).toBeUndefined();
   });
 });
