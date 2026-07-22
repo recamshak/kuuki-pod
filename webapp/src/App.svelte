@@ -67,7 +67,7 @@
   let showTemp = $state(false);
   let showHumidity = $state(false);
 
-  // The rich Pod list, re-read after every fleet change; everything the hero, chart
+  // The rich Pod view, re-read after every fleet change; everything the hero, chart
   // and picker show is read off `selected`, one object out of this list.
   const pods = $derived.by(() => {
     stateVersion; // touch the signal to establish the reactive dependency
@@ -88,7 +88,8 @@
   // path, so select it and prompt for a name when it has none.
   async function connect(): Promise<void> {
     const id = await fleet.connect();
-    if (id === null) return; // cancelled chooser or surfaced error
+    if (id === null) return; // cancelled chooser, or the connect itself failed
+    // (a failed *first Sync* still returns the id — the Pod is registered)
     selectedId = id;
     if (!fleet.hasName(id)) {
       const answer = window.prompt("Name this Pod");

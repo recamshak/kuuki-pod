@@ -6,7 +6,7 @@ import type { LiveReading } from './wire';
 
 // Fleet drives the whole Pod lifecycle behind an injected interface (tickets 11a,
 // 13a). These suites assert external behaviour only — fakes and method calls in,
-// `pods` values and which change signal fired out — never the private registries, so
+// `pods` values and which change signal fired out — never the private maps, so
 // they survive a reimplementation. Prior art: EnumerableFakeStore in pods.test.ts,
 // the store double in history.test.ts.
 
@@ -157,8 +157,8 @@ describe('Fleet — persistence load', () => {
   });
 });
 
-describe('Fleet — rich Pod list (pods)', () => {
-  it('returns id, name, connected, syncing, live and history in knownPodIds order', async () => {
+describe('Fleet — rich Pod view (pods)', () => {
+  it('returns id, name, connected, syncing, live and history in the order Pods became known', async () => {
     const names = new Names({ store: new FakeStore() });
     names.setName('pod-a', 'Living room');
     const a = new FakeConnection('pod-a', [rec(900, 600)]);

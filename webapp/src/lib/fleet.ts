@@ -163,14 +163,9 @@ export class Fleet {
     deps.schedule(() => this.autoSyncTick(), AUTO_SYNC_MS);
   }
 
-  /** The Pod IDs the webapp knows about (connected or merely persisted). */
-  get knownPodIds(): string[] {
-    return this._knownPodIds;
-  }
-
   /**
-   * The rich view over every known Pod (connected or merely persisted), in
-   * `knownPodIds` order. The shell reads everything off one entry.
+   * The rich view over every known Pod (connected or merely persisted), in the
+   * order Pods became known. The shell reads everything off one entry.
    */
   get pods(): PodView[] {
     return this._knownPodIds.map((id) => ({
