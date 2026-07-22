@@ -598,6 +598,34 @@ describe('Fleet — remove', () => {
     expect(change.count).toBeGreaterThan(0);
   });
 
+  it('drops the Pod from pods before the forget handle resolves (nothing lingers on the hero)', async () => {
+    // The forget handle is a real BLE round-trip; the UI must not keep showing
+    // the vanishing Pod (via the shell's pods[0] fallback) while it is in flight.
+    let deliver!: (conn: PodConnectionLike, forget: () => Promise<void>) => void;
+    const fleet = new Fleet(
+      makeDeps({
+        reconnectPods: (onReconnect) =>
+          (deliver = onReconnect as (c: PodConnectionLike, f: () => Promise<void>) => void),
+      }),
+    );
+
+    let resolveForget!: () => void;
+    const conn = new FakeConnection('pod-only');
+    await deliver(conn, () => new Promise<void>((r) => (resolveForget = r)));
+    expect(fleet.pods.map((p) => p.id)).toEqual(['pod-only']);
+
+    const change = counter();
+    fleet.onChange = change.fire;
+
+    const removal = fleet.remove('pod-only');
+    expect(fleet.pods).toEqual([]); // gone synchronously, before the revoke settles
+    expect(change.count).toBeGreaterThan(0);
+
+    resolveForget();
+    await removal;
+    expect(fleet.pods).toEqual([]);
+  });
+
   it('disconnects a Pod with no supervision handle and empties pods when it was the only one', async () => {
     const deleted: string[] = [];
     const conn = new FakeConnection('pod-only');

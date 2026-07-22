@@ -239,18 +239,17 @@ export class Fleet {
    * from every per-Pod map, wipe its persisted History (12b) and its name.
    */
   async remove(podId: string): Promise<void> {
+    const conn = this.connections.get(podId);
     const forget = this.forgetByPod.get(podId);
-    if (forget) {
-      // Aborts supervision (stops scanning/reconnecting) and drops the GATT link.
-      try {
-        await forget();
-      } catch {
-        // Best effort: a failed revoke must not strand the Pod in the UI.
-      }
-    } else {
-      this.connections.get(podId)?.disconnect();
-    }
 
+    // Drop the Pod from every map and signal *before* revoking the grant: the
+    // revoke is a real BLE round-trip, and the UI must not keep showing the
+    // vanishing Pod while it is in flight. Unsubscribe the connection first so a
+    // late Live reading / drop from it cannot resurrect state or fire signals.
+    if (conn) {
+      conn.onLiveReading = undefined;
+      conn.onDisconnected = undefined;
+    }
     this.connections.delete(podId);
     this.histories.delete(podId);
     this.liveByPod.delete(podId);
@@ -260,6 +259,18 @@ export class Fleet {
     this.deps.deleteHistory(podId);
     this.deps.names.forget(podId);
     this.onChange?.();
+
+    if (forget) {
+      // Aborts supervision (stops scanning/reconnecting) and drops the GATT link.
+      try {
+        await forget();
+      } catch {
+        // Best effort: a failed revoke changes nothing — the Pod is already gone
+        // from the UI and its persisted state.
+      }
+    } else {
+      conn?.disconnect();
+    }
   }
 
   /** Run an async action under the shared busy flag with error surfacing. */
