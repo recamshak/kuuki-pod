@@ -1,18 +1,19 @@
 <script lang="ts">
   /*
    * The one-screen dashboard (ticket 10), now a thin presentation shell over the
-   * Fleet seam (ticket 11b). This is the untestable UI seam per ADR-0004: it wires
-   * the tested pure modules together and owns nothing correctness-critical. The whole
-   * multi-Pod lifecycle — known Pods keyed by ID, auto-selection, Live-reading fan-in,
-   * disconnect handling, persistence load, persistent pairing, and the
+   * Fleet seam (tickets 11b, 13). This is the untestable UI seam per ADR-0004: it
+   * wires the tested pure modules together and owns nothing correctness-critical.
+   * The whole multi-Pod lifecycle — known Pods keyed by ID, Live-reading fan-in,
+   * disconnect handling, persistence load, persistent pairing, names, and the
    * connect/Sync/reconnect orchestration — lives in the tested `Fleet`. What remains
-   * here is pure presentation: the range/temp/humidity preferences, the dashboard.ts
-   * transforms, text formatting, and the production FleetDeps wiring.
+   * here is pure presentation: a trivial `selectedId`, the range/temp/humidity
+   * preferences, the dashboard.ts transforms, text formatting, and the production
+   * FleetDeps wiring.
    *   - Live reading  → CO₂-hero (colour-banded) + secondary temp/humidity.
    *   - Per-Pod History → uPlot timeseries over a selectable range.
    */
   import Chart from "./lib/Chart.svelte";
-  import PodPicker, { type PickerPod } from "./lib/PodPicker.svelte";
+  import PodPicker from "./lib/PodPicker.svelte";
   import {
     co2Band,
     RANGES,
@@ -32,7 +33,7 @@
   // The Fleet owns the whole multi-Pod lifecycle behind its tested interface. Wire it
   // with production FleetDeps: the real transport/history functions, a no-op reconnect
   // where Web Bluetooth is absent (the real one reaches for navigator), the ambient
-  // timer for the auto-sync loop, and localStorage for selection persistence.
+  // timer for the auto-sync loop, and the localStorage-backed Names it composes.
   const fleet = new Fleet({
     connectPod,
     reconnectPods: supported ? reconnectPods : () => {},
@@ -42,73 +43,74 @@
       const handle = setInterval(cb, everyMs);
       return () => clearInterval(handle);
     },
-    selectionStore: localStorage,
+    names: new Names({ store: localStorage }),
     deleteHistory,
   });
 
-  // Per-Pod human-readable labels (names.ts), built alongside the Fleet with the same
-  // production localStorage. Resolving a name reads localStorage, which Svelte can't
-  // track, so a rename/first-name bumps `namesVersion` to recompute the picker list.
-  const names = new Names({ store: localStorage });
-  let namesVersion = $state(0);
+  // Selection is the shell's trivial state (ticket 13): no persistence, no restore,
+  // no focus-stealing rules. When it is null or points at a vanished Pod, `selected`
+  // falls back to the first known Pod.
+  let selectedId = $state<string | null>(null);
 
   // Map Fleet's two change signals to two $state counters. Only the History counter
-  // feeds the chart's $derived, so a Live reading refreshes the hero number without
-  // rebuilding the chart or resetting uPlot's zoom.
-  let historyVersion = $state(0); // bumps when a Merge completes
-  let stateVersion = $state(0); // bumps on selection/connection/live/busy/error
-  fleet.onHistoryChange = () => historyVersion++;
-  fleet.onStateChange = () => stateVersion++;
-
-  // First-connect naming: the one time a genuinely new Pod registers, prompt for a
-  // name. Fleet fires this exactly once per new Pod (never on reload of a persisted-
-  // but-unnamed Pod), so a plain prompt here is enough; guard on hasName so a Pod the
-  // user already named some other way is left alone.
-  fleet.onNewPod = (id) => {
-    if (names.hasName(id)) return;
-    const answer = window.prompt("Name this Pod");
-    if (answer) {
-      names.setName(id, answer);
-      namesVersion++;
-    }
+  // feeds the chart's $derived — and only for the displayed Pod's Merge — so a Live
+  // reading or a hidden Pod's background Merge refreshes nothing chart-shaped and
+  // never resets uPlot's zoom.
+  let historyVersion = $state(0); // bumps when the displayed Pod's Merge completes
+  let stateVersion = $state(0); // bumps on membership/connection/live/name/busy/error
+  fleet.onHistoryChange = (podId) => {
+    if (podId === selected?.id) historyVersion++;
   };
+  fleet.onChange = () => stateVersion++;
 
   let range = $state<Range>(RANGES[1]); // default to 24h
   let showTemp = $state(false);
   let showHumidity = $state(false);
 
-  // Read Fleet through its getters. `tracked` wraps a getter read so it first touches
-  // stateVersion, re-reading the getter after every state change — the same "establish
-  // the dependency" idiom the chart's plotData uses below for historyVersion.
-  const tracked = <T,>(read: () => T): (() => T) => () => {
-    stateVersion; // touch the state signal to establish the reactive dependency
-    return read();
-  };
-  const fleetPods = $derived.by(tracked(() => fleet.pods));
-  const selectedPodId = $derived.by(tracked(() => fleet.selectedPodId));
-  const selectedHistory = $derived.by(tracked(() => fleet.selectedHistory));
-  const live = $derived.by(tracked(() => fleet.live));
-  const connected = $derived.by(tracked(() => fleet.connected));
-  const syncing = $derived.by(tracked(() => fleet.syncing));
-  const error = $derived.by(tracked(() => fleet.error));
-
-  const pickerPods = $derived.by<PickerPod[]>(() => {
-    namesVersion; // establish the dependency: recompute after a rename
-    return fleetPods.map((p) => ({
-      id: p.id,
-      name: names.getName(p.id),
-      connected: p.connected,
-    }));
+  // The rich Pod list, re-read after every fleet change; everything the hero, chart
+  // and picker show is read off `selected`, one object out of this list.
+  const pods = $derived.by(() => {
+    stateVersion; // touch the signal to establish the reactive dependency
+    return fleet.pods;
   });
+  const error = $derived.by(() => {
+    stateVersion;
+    return fleet.error;
+  });
+  const selected = $derived(
+    pods.find((p) => p.id === selectedId) ?? pods[0] ?? null,
+  );
+  // Stable across pod-list rebuilds (same History object), so plotData below only
+  // recomputes when the selection itself changes — not on every fleet change.
+  const selectedHistory = $derived(selected?.history);
 
-  // Rename lives in the parent (the picker only emits the intent, ticket 12e/12f):
-  // prompt seeded with the current label, persist a non-blank answer, and recompute.
-  function renamePod(id: string): void {
-    const answer = window.prompt("Rename Pod", names.getName(id));
-    if (answer === null) return; // cancelled
-    names.setName(id, answer);
-    namesVersion++;
+  // Connect → select → name (ticket 13): the returned id is the one genuinely-new-Pod
+  // path, so select it and prompt for a name when it has none.
+  async function connect(): Promise<void> {
+    const id = await fleet.connect();
+    if (id === null) return; // cancelled chooser or surfaced error
+    selectedId = id;
+    if (!fleet.hasName(id)) {
+      const answer = window.prompt("Name this Pod");
+      if (answer) fleet.rename(id, answer);
+    }
   }
+
+  // Rename lives in the shell (the picker only emits the intent, ticket 12e/12f):
+  // prompt seeded with the current label; Fleet persists and signals the change.
+  function renamePod(id: string): void {
+    const answer = window.prompt(
+      "Rename Pod",
+      pods.find((p) => p.id === id)?.name,
+    );
+    if (answer === null) return; // cancelled
+    fleet.rename(id, answer);
+  }
+
+  // Hero reads off the one selected Pod object (rich `PodView`, ticket 13).
+  const live = $derived(selected?.live ?? null);
+  const connected = $derived(selected?.connected ?? false);
+  const syncing = $derived(selected?.syncing ?? false);
 
   const band = $derived(live ? co2Band(live.co2) : null);
 
@@ -131,13 +133,15 @@
 <main>
   <header>
     <PodPicker
-      pods={pickerPods}
-      selectedId={selectedPodId}
-      onSelect={(id) => fleet.select(id)}
-      onConnect={() => fleet.connect()}
+      {pods}
+      selectedId={selected?.id ?? null}
+      onSelect={(id) => (selectedId = id)}
+      onConnect={connect}
       onForget={(id) => {
-        fleet.remove(id);
-        names.forget(id);
+        // One-call forget (ticket 13): Fleet clears grant + History + name; the
+        // shell only re-points selection, which falls back to the first Pod left.
+        if (id === selectedId) selectedId = null;
+        void fleet.remove(id);
       }}
       onRename={renamePod}
     />
