@@ -140,8 +140,12 @@
       onConnect={connect}
       onForget={(id) => {
         // One-call forget (ticket 13): Fleet clears grant + History + name; the
-        // shell only re-points selection, which falls back to the first Pod left.
-        if (id === selectedId) selectedId = null;
+        // shell only re-points selection — immediately, before the async remove
+        // resolves, so the vanishing Pod is never left on the hero. Compare
+        // against `selected` (not `selectedId`) to also cover the pods[0]
+        // fallback displaying a Pod no id points at.
+        if (id === selected?.id)
+          selectedId = pods.find((p) => p.id !== id)?.id ?? null;
         void fleet.remove(id);
       }}
       onRename={renamePod}
