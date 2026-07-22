@@ -240,12 +240,14 @@
 <style>
   .picker {
     position: relative;
-    display: inline-block;
+    width: 100%;
   }
 
   .trigger {
-    display: inline-flex;
+    display: flex;
     align-items: center;
+    width: 100%;
+    box-sizing: border-box;
     gap: 0.5rem;
     background: #161b22;
     color: #e6edf3;
@@ -262,15 +264,16 @@
 
   .caret {
     opacity: 0.6;
-    font-size: 0.75rem;
   }
 
   .menu {
     position: absolute;
     top: calc(100% + 0.35rem);
     left: 0;
+    right: 0;
+    width: 100%;
+    box-sizing: border-box;
     z-index: 10;
-    min-width: max(220px, 100%);
     display: flex;
     flex-direction: column;
     padding: 0.3rem;
@@ -357,6 +360,8 @@
   }
 
   .label {
+    flex: 1;
+    text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
