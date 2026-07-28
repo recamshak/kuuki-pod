@@ -21,6 +21,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "app_config.h"
 #include "ble.h"
 #include "buffer.h"
 #include "live.h"
@@ -101,16 +102,11 @@ static struct bt_conn *active_conn;
  * Scratch for one Sync, owned solely by the sync thread. The record set is
  * materialised here by sync_collect() (up to the whole Buffer), then encoded a
  * notification at a time into ntf_payload. Static, not on the thread stack:
- * together they are ~34 KB. ntf_payload is sized for the largest configured
+ * together they are ~35 KB. ntf_payload is sized for the largest configured
  * notification so a runtime MTU (never larger) always fits.
  */
-static struct aged_sample sync_records[BUFFER_CAPACITY];
+static struct aged_sample sync_records[KUUKI_BUFFER_CAPACITY];
 static uint8_t ntf_payload[CONFIG_BT_L2CAP_TX_MTU - ATT_NTF_OVERHEAD];
-
-/* sync_collect() trims *after* snapshotting the Buffer, so a scratch smaller
- * than the ring would drop the newest Samples before the trim saw them. */
-BUILD_ASSERT(ARRAY_SIZE(sync_records) >= BUFFER_CAPACITY,
-	     "Sync scratch must span the whole Buffer");
 
 static ssize_t read_pod_id(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			   void *buf, uint16_t len, uint16_t offset)
@@ -382,8 +378,9 @@ static void sync_thread_run(void *p1, void *p2, void *p3)
 		 * notify streaming so a Sample tick isn't stalled by it. */
 		k_mutex_lock(sync_buffer_lock, K_FOREVER);
 		size_t count = sync_collect(sync_buffer, latch_uptime, mark,
-					    SAMPLE_INTERVAL_SEC, sync_records,
-					    BUFFER_CAPACITY);
+					    CONFIG_KUUKI_SAMPLE_INTERVAL_SEC,
+					    sync_records,
+					    ARRAY_SIZE(sync_records));
 		k_mutex_unlock(sync_buffer_lock);
 
 		stream_batch(conn, count);
@@ -403,6 +400,20 @@ void ble_live_update(const struct sample *s)
 
 int ble_start(struct buffer *buf, struct k_mutex *buf_lock)
 {
+	/* sync_collect() trims *after* snapshotting the Buffer, so a scratch
+	 * smaller than the ring would discard the newest Samples before the trim
+	 * ever saw them — a Sync could answer with nothing while unsent Samples
+	 * remain. Both the scratch and the application's ring are sized from
+	 * KUUKI_BUFFER_CAPACITY, so this is unreachable today; it is the tripwire
+	 * if a caller ever hands us a ring sized any other way. Refuse rather
+	 * than serve Syncs that silently lose Samples. */
+	if (buffer_capacity(buf) > ARRAY_SIZE(sync_records)) {
+		LOG_ERR("Buffer holds %zu Samples but the Sync scratch spans %zu; "
+			"refusing to serve lossy Syncs", buffer_capacity(buf),
+			ARRAY_SIZE(sync_records));
+		return -EINVAL;
+	}
+
 	sync_buffer = buf;
 	sync_buffer_lock = buf_lock;
 

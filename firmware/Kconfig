@@ -1,0 +1,37 @@
+# kuuki-pod firmware project parameters (ticket 14b).
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Pod's product decisions — how often a Measurement is promoted to a Sample,
+# and how far back the Buffer keeps Samples — live here, on the configuration
+# surface, not inside the modules that happen to use them. The ring Buffer is
+# handed a plain capacity derived from these (see src/app_config.h) and knows
+# nothing about either.
+
+menu "kuuki-pod"
+
+config KUUKI_SAMPLE_INTERVAL_SEC
+	int "Sample tick interval, seconds"
+	default 900
+	range 1 86400
+	help
+	  The Sample tick cadence: the Pod promotes one of the SCD40's
+	  Measurements to a Sample this often. 900 (15 minutes) is the v1
+	  cadence the webapp's Merge snaps slots to (CONTEXT.md), so changing it
+	  changes what a slot means on the wire. The Buffer is resized to still
+	  span KUUKI_RETENTION_SEC, which this must divide evenly — a build with
+	  a leftover fails on a BUILD_ASSERT rather than quietly spanning less.
+
+config KUUKI_RETENTION_SEC
+	int "Buffer retention target, seconds"
+	default 2592000
+	range 1 31536000
+	help
+	  How far back the in-RAM Buffer keeps Samples before overwriting its
+	  oldest. 2592000 (30 days) is the v1 target. Must be a whole number of
+	  Sample intervals; the resulting ring costs 12 bytes of RAM per Sample,
+	  twice over (the Buffer itself and the Sync scratch that snapshots it).
+
+endmenu
+
+source "Kconfig.zephyr"

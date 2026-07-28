@@ -16,15 +16,26 @@
 #include "buffer.h"
 #include "sync.h"
 
-/* The Buffer and a whole sync_collect() output are ~28 KB each — keep them off the
- * test stack. */
+/*
+ * A ring big enough for the slot cases below, with its own storage: how large
+ * the Pod's actual Buffer is (and how often it Samples) are project parameters
+ * the trim never reads — it is handed the interval (ticket 14b).
+ */
+#define TEST_CAPACITY 16
+
+/* The Sample interval these tests collect with: the v1 15-minute tick, stated
+ * here rather than borrowed from the Pod's configuration. */
+#define TEST_INTERVAL_SEC 900
+
 static struct buffer buf;
-static struct aged_sample out[BUFFER_CAPACITY];
+static struct sample storage[TEST_CAPACITY];
+static struct aged_sample out[TEST_CAPACITY];
 
 static void reset(void *fixture)
 {
 	ARG_UNUSED(fixture);
-	buffer_init(&buf);
+	buffer_init(&buf, storage, TEST_CAPACITY);
+	memset(storage, 0, sizeof(storage));
 	memset(out, 0, sizeof(out));
 }
 
@@ -45,8 +56,8 @@ static void put(uint32_t capture_uptime, uint16_t tag)
 /* Collect with the v1 Sample interval, over the whole Buffer. */
 static size_t collect(uint32_t latch, uint32_t mark)
 {
-	return sync_collect(&buf, latch, mark, SAMPLE_INTERVAL_SEC, out,
-			    BUFFER_CAPACITY);
+	return sync_collect(&buf, latch, mark, TEST_INTERVAL_SEC, out,
+			    TEST_CAPACITY);
 }
 
 /* The sentinel mark means "I have nothing" — every stored Sample is sent. */
@@ -56,7 +67,7 @@ ZTEST(sync, test_sentinel_collects_everything)
 	const int count = 7;
 
 	for (int i = 0; i < count; i++) {
-		put(latch - (uint32_t)(count - i) * SAMPLE_INTERVAL_SEC, (uint16_t)i);
+		put(latch - (uint32_t)(count - i) * TEST_INTERVAL_SEC, (uint16_t)i);
 	}
 
 	size_t n = collect(latch, MARK_SENTINEL);
@@ -73,16 +84,16 @@ ZTEST(sync, test_high_water_trims_to_matched_slot)
 
 	/* k = 1..10: Sample k has Age k*interval (slot k), tagged co2 = k. */
 	for (int k = 10; k >= 1; k--) {
-		put(latch - (uint32_t)k * SAMPLE_INTERVAL_SEC, (uint16_t)k);
+		put(latch - (uint32_t)k * TEST_INTERVAL_SEC, (uint16_t)k);
 	}
 
 	/* Client's newest known Sample is slot 3 (Age 2700). Expect slots 1,2. */
-	size_t n = collect(latch, 3 * SAMPLE_INTERVAL_SEC);
+	size_t n = collect(latch, 3 * TEST_INTERVAL_SEC);
 
 	zassert_equal(n, 2, "only Samples strictly newer than slot 3");
-	zassert_equal(out[0].age, 2 * SAMPLE_INTERVAL_SEC, "oldest-first: slot 2");
+	zassert_equal(out[0].age, 2 * TEST_INTERVAL_SEC, "oldest-first: slot 2");
 	zassert_equal(out[0].co2, 2, "slot 2 identity");
-	zassert_equal(out[1].age, 1 * SAMPLE_INTERVAL_SEC, "then slot 1");
+	zassert_equal(out[1].age, 1 * TEST_INTERVAL_SEC, "then slot 1");
 	zassert_equal(out[1].co2, 1, "slot 1 identity");
 }
 
@@ -93,7 +104,7 @@ ZTEST(sync, test_skewed_mark_snaps_to_the_same_slot)
 	const uint32_t latch = 1000000;
 
 	for (int k = 10; k >= 1; k--) {
-		put(latch - (uint32_t)k * SAMPLE_INTERVAL_SEC, (uint16_t)k);
+		put(latch - (uint32_t)k * TEST_INTERVAL_SEC, (uint16_t)k);
 	}
 
 	/* Marks either side of slot 3's exact Age must all match slot 3 —
@@ -102,12 +113,12 @@ ZTEST(sync, test_skewed_mark_snaps_to_the_same_slot)
 	const int32_t skews[] = {
 		-50,
 		+50,
-		-(SAMPLE_INTERVAL_SEC / 2 - 1),
-		+(SAMPLE_INTERVAL_SEC / 2),
+		-(TEST_INTERVAL_SEC / 2 - 1),
+		+(TEST_INTERVAL_SEC / 2),
 	};
 
 	for (size_t i = 0; i < ARRAY_SIZE(skews); i++) {
-		size_t n = collect(latch, (uint32_t)(3 * SAMPLE_INTERVAL_SEC + skews[i]));
+		size_t n = collect(latch, (uint32_t)(3 * TEST_INTERVAL_SEC + skews[i]));
 
 		zassert_equal(n, 2, "a skewed mark matches the nearest slot");
 		zassert_equal(out[0].co2, 2, "slot 2 is the oldest unseen Sample");
@@ -122,7 +133,7 @@ ZTEST(sync, test_mark_older_than_every_sample_collects_all)
 	const int count = 4;
 
 	for (int i = 0; i < count; i++) {
-		put(latch - (uint32_t)(count - i) * SAMPLE_INTERVAL_SEC, (uint16_t)i);
+		put(latch - (uint32_t)(count - i) * TEST_INTERVAL_SEC, (uint16_t)i);
 	}
 
 	/* Larger than any real Age here but well below the sentinel: the client's
@@ -141,7 +152,7 @@ ZTEST(sync, test_mark_older_than_every_sample_collects_all)
 ZTEST(sync, test_empty_buffer_collects_nothing)
 {
 	zassert_equal(collect(1000000, MARK_SENTINEL), 0, "nothing to send");
-	zassert_equal(collect(1000000, 3 * SAMPLE_INTERVAL_SEC), 0, "still nothing");
+	zassert_equal(collect(1000000, 3 * TEST_INTERVAL_SEC), 0, "still nothing");
 }
 
 /* A tagged record so each field is distinguishable on the wire. */

@@ -1,0 +1,20 @@
+# Twister discovers this suite and runs it on the host via native_sim, twice:
+# at the parameters the Pod ships with, and at an overridden Sample interval, so
+# the ring's capacity is shown to follow the configured cadence.
+tests:
+  kuuki_pod.config:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    tags:
+      - config
+  kuuki_pod.config.short_interval:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    tags:
+      - config
+    extra_configs:
+      - CONFIG_KUUKI_SAMPLE_INTERVAL_SEC=300

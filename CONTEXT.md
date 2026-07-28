@@ -31,11 +31,15 @@ A raw reading the SCD40 produces on its own cadence (~every 30 s in low-power pe
 _Avoid_: reading
 
 **Sample tick**:
-The 15-minute cadence on which the MCU wakes, grabs the SCD40's latest Measurement, and stores it as a Sample. Distinct from the SCD40's internal ~30 s measurement cadence.
+The 15-minute cadence on which the MCU wakes, grabs the SCD40's latest Measurement, and stores it as a Sample. Distinct from the SCD40's internal ~30 s measurement cadence. It is a firmware project parameter (`CONFIG_KUUKI_SAMPLE_INTERVAL_SEC`, see `firmware/Kconfig`), handed down to the modules that need it rather than defined inside one of them.
 
 **Buffer**:
-The Pod's in-RAM ring of Samples, sized to hold ~30 days. When full it overwrites the oldest Sample, so it always holds the most recent ~30 days regardless of when the user last Synced. Each Sample carries its device capture time so Ages stay exact even if a Sample tick slips. The Buffer only ever hands over *everything* it holds, aged against the Latched read instant; which subset a given client still needs is decided by Sync against the **High-water mark**, never by the Buffer.
+The Pod's in-RAM ring of Samples, sized to hold ~30 days. When full it overwrites the oldest Sample, so it always holds the most recent ~30 days regardless of when the user last Synced. That span is the **Retention target**; the ring itself is a dumb container handed a capacity derived from it, so it knows neither the target nor the Sample tick. Each Sample carries its device capture time so Ages stay exact even if a Sample tick slips. The Buffer only ever hands over *everything* it holds, aged against the Latched read instant; which subset a given client still needs is decided by Sync against the **High-water mark**, never by the Buffer.
 _Avoid_: log, store, queue, history (history is the webapp's localStorage copy)
+
+**Retention target**:
+How far back the Buffer keeps Samples before overwriting its oldest — ~30 days for v1. A firmware project parameter (`CONFIG_KUUKI_RETENTION_SEC`, see `firmware/Kconfig`); with the Sample tick it fixes the ring's capacity in Samples, which is the only form the Buffer ever sees. A Pod's Retention target says nothing about the webapp's History, which grows without bound.
+_Avoid_: window, TTL, expiry
 
 **Sync**:
 The act of a connected webapp pulling accumulated Samples from the Pod over the BLE GATT service. Streamed oldest-first so a dropped connection self-heals via the High-water mark. The only path buffered data leaves the Pod.

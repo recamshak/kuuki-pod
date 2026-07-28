@@ -56,6 +56,9 @@ static struct buffer *target;
 /* Serialises Buffer writes here against the Sync reader (ticket 07). */
 static struct k_mutex *buffer_lock;
 
+/* The Sample tick cadence the application configured (ticket 14b). */
+static uint32_t sample_interval;
+
 /*
  * Read the SCD40's latest Measurement into *out. Returns true on a fresh, real
  * Measurement; false (nothing written) when the fetch fails or the sensor has
@@ -116,7 +119,7 @@ static void sampler_run(void *p1, void *p2, void *p3)
 
 			if (last_sample_uptime == INT64_MIN ||
 			    (int64_t)s.capture_uptime - last_sample_uptime >=
-				    SAMPLE_INTERVAL_SEC) {
+				    sample_interval) {
 				/* Hold buffer_lock so a concurrent Sync's
 				 * collect() never reads a half-written ring. */
 				k_mutex_lock(buffer_lock, K_FOREVER);
@@ -136,7 +139,8 @@ static void sampler_run(void *p1, void *p2, void *p3)
 	}
 }
 
-int sampler_start(struct buffer *buf, struct k_mutex *buf_lock)
+int sampler_start(struct buffer *buf, struct k_mutex *buf_lock,
+		  uint32_t sample_interval_sec)
 {
 	if (!device_is_ready(scd40)) {
 		LOG_ERR("SCD40 not ready; sampling disabled");
@@ -145,12 +149,13 @@ int sampler_start(struct buffer *buf, struct k_mutex *buf_lock)
 
 	target = buf;
 	buffer_lock = buf_lock;
+	sample_interval = sample_interval_sec;
 	k_thread_create(&sampler_thread, sampler_stack, SAMPLER_STACK_SIZE,
 			sampler_run, NULL, NULL, NULL, SAMPLER_PRIORITY, 0,
 			K_NO_WAIT);
 	k_thread_name_set(&sampler_thread, "sampler");
 
-	LOG_INF("Sampler started: Measurement every %d s, Sample every %d s",
-		MEASUREMENT_INTERVAL_SEC, SAMPLE_INTERVAL_SEC);
+	LOG_INF("Sampler started: Measurement every %d s, Sample every %u s",
+		MEASUREMENT_INTERVAL_SEC, sample_interval);
 	return 0;
 }
