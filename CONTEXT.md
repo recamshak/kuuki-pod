@@ -34,7 +34,7 @@ _Avoid_: reading
 The 15-minute cadence on which the MCU wakes, grabs the SCD40's latest Measurement, and stores it as a Sample. Distinct from the SCD40's internal ~30 s measurement cadence.
 
 **Buffer**:
-The Pod's in-RAM ring of Samples, sized to hold ~30 days. When full it overwrites the oldest Sample, so it always holds the most recent ~30 days regardless of when the user last Synced. Each Sample carries its device capture time so Ages stay exact even if a Sample tick slips.
+The Pod's in-RAM ring of Samples, sized to hold ~30 days. When full it overwrites the oldest Sample, so it always holds the most recent ~30 days regardless of when the user last Synced. Each Sample carries its device capture time so Ages stay exact even if a Sample tick slips. The Buffer only ever hands over *everything* it holds, aged against the Latched read instant; which subset a given client still needs is decided by Sync against the **High-water mark**, never by the Buffer.
 _Avoid_: log, store, queue, history (history is the webapp's localStorage copy)
 
 **Sync**:

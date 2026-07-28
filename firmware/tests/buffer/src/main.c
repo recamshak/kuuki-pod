@@ -1,8 +1,9 @@
 /*
- * Host ztests for the in-RAM ring Buffer and its collect() Sync query
- * (ticket 04). Every test asserts external behaviour — inputs to records —
- * never the ring's internal index arithmetic, so it survives a reimplementation
- * of the internals.
+ * Host ztests for the in-RAM ring Buffer (ticket 04). Every test asserts
+ * external behaviour — inputs to snapshot records — never the ring's internal
+ * index arithmetic, so it survives a reimplementation of the internals. What a
+ * given client still needs out of that snapshot is Sync's business; those cases
+ * live in tests/sync/ (ticket 14a).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -13,10 +14,10 @@
 
 #include "buffer.h"
 
-/* The Buffer and the collect() output are ~28 KB each — keep them off the
+/* The Buffer and the snapshot output are ~28 KB each — keep them off the
  * test stack. */
 static struct buffer buf;
-static struct sync_record out[BUFFER_CAPACITY];
+static struct aged_sample out[BUFFER_CAPACITY];
 
 static void reset(void *fixture)
 {
@@ -61,7 +62,7 @@ ZTEST(buffer, test_overflow_overwrites_oldest)
 	}
 
 	uint32_t latch = (total + 1) * SAMPLE_INTERVAL_SEC;
-	size_t n = buffer_collect(&buf, latch, MARK_SENTINEL, out, BUFFER_CAPACITY);
+	size_t n = buffer_snapshot(&buf, latch, out, BUFFER_CAPACITY);
 
 	zassert_equal(n, BUFFER_CAPACITY, "ring holds exactly capacity Samples");
 	/* The first `overflow` insertions were overwritten; the oldest survivor
@@ -81,8 +82,8 @@ ZTEST(buffer, test_records_ordered_oldest_first)
 		put(latch - (uint32_t)(count - i) * SAMPLE_INTERVAL_SEC, (uint16_t)i);
 	}
 
-	size_t n = buffer_collect(&buf, latch, MARK_SENTINEL, out, BUFFER_CAPACITY);
-	zassert_equal(n, (size_t)count, "sentinel returns every Sample");
+	size_t n = buffer_snapshot(&buf, latch, out, BUFFER_CAPACITY);
+	zassert_equal(n, (size_t)count, "the snapshot returns every stored Sample");
 
 	for (size_t i = 1; i < n; i++) {
 		zassert_true(out[i].age < out[i - 1].age,
@@ -92,43 +93,11 @@ ZTEST(buffer, test_records_ordered_oldest_first)
 	}
 }
 
-/* High-water trimming returns exactly the Samples newer than the matched slot. */
-ZTEST(buffer, test_high_water_trims_to_matched_slot)
+/* An empty Buffer snapshots to nothing. */
+ZTEST(buffer, test_empty_buffer_snapshots_nothing)
 {
-	const uint32_t latch = 1000000;
-
-	/* k = 1..10: Sample k has Age k*interval (slot k), tagged co2 = k. */
-	for (int k = 10; k >= 1; k--) {
-		put(latch - (uint32_t)k * SAMPLE_INTERVAL_SEC, (uint16_t)k);
-	}
-
-	/* Client's newest known Sample is slot 3 (Age 2700). Expect slots 1,2. */
-	size_t n = buffer_collect(&buf, latch, 3 * SAMPLE_INTERVAL_SEC, out,
-				  BUFFER_CAPACITY);
-	zassert_equal(n, 2, "only Samples strictly newer than slot 3");
-	zassert_equal(out[0].age, 2 * SAMPLE_INTERVAL_SEC, "oldest-first: slot 2");
-	zassert_equal(out[0].co2, 2, "slot 2 identity");
-	zassert_equal(out[1].age, 1 * SAMPLE_INTERVAL_SEC, "then slot 1");
-	zassert_equal(out[1].co2, 1, "slot 1 identity");
-
-	/* A mark off a slot boundary snaps to the same slot 3 → same result. */
-	size_t n_skewed = buffer_collect(&buf, latch, 3 * SAMPLE_INTERVAL_SEC - 50,
-					 out, BUFFER_CAPACITY);
-	zassert_equal(n_skewed, 2, "a skewed mark matches the nearest slot");
-}
-
-/* The sentinel mark returns the whole Buffer. */
-ZTEST(buffer, test_sentinel_returns_all)
-{
-	const uint32_t latch = 1000000;
-	const int count = 7;
-
-	for (int i = 0; i < count; i++) {
-		put(latch - (uint32_t)(count - i) * SAMPLE_INTERVAL_SEC, (uint16_t)i);
-	}
-
-	size_t n = buffer_collect(&buf, latch, MARK_SENTINEL, out, BUFFER_CAPACITY);
-	zassert_equal(n, (size_t)count, "sentinel emits every stored Sample");
+	zassert_equal(buffer_snapshot(&buf, 1000000, out, BUFFER_CAPACITY), 0,
+		      "a fresh Buffer holds no Samples");
 }
 
 /* Age = latch_uptime − capture_uptime, exact even when a tick slips. */
@@ -142,30 +111,9 @@ ZTEST(buffer, test_age_exact_with_slipped_tick)
 	put(latch - 2000, 2);
 	put(latch - 900, 3);
 
-	size_t n = buffer_collect(&buf, latch, MARK_SENTINEL, out, BUFFER_CAPACITY);
+	size_t n = buffer_snapshot(&buf, latch, out, BUFFER_CAPACITY);
 	zassert_equal(n, 3, "all three Samples");
 	zassert_equal(out[0].age, 2900, "oldest Age exact");
 	zassert_equal(out[1].age, 2000, "slipped-tick Age exact");
 	zassert_equal(out[2].age, 900, "newest Age exact");
-}
-
-/* Fresh Buffer + a large (non-sentinel) client mark returns everything with no
- * bogus Ages. */
-ZTEST(buffer, test_fresh_buffer_large_mark_no_bad_ages)
-{
-	const uint32_t latch = 1000000;
-	const int count = 4;
-
-	for (int i = 0; i < count; i++) {
-		put(latch - (uint32_t)(count - i) * SAMPLE_INTERVAL_SEC, (uint16_t)i);
-	}
-
-	/* Larger than any real Age here but well below the sentinel. */
-	size_t n = buffer_collect(&buf, latch, 10000000, out, BUFFER_CAPACITY);
-	zassert_equal(n, (size_t)count, "a mark past every Sample returns them all");
-
-	for (size_t i = 0; i < n; i++) {
-		zassert_true(out[i].age <= latch,
-			     "Age never underflows into a bogus huge value");
-	}
 }

@@ -65,7 +65,7 @@ static bool live_notify_enabled;
 
 /*
  * Sync (ticket 07) state. The Buffer and its lock are borrowed from the
- * application for the Pod's lifetime; collect() reads the Buffer under the lock
+ * application for the Pod's lifetime; sync_collect() reads the Buffer under the lock
  * so the sampler's concurrent buffer_put() is never observed half-written.
  */
 static struct buffer *sync_buffer;
@@ -99,13 +99,18 @@ static struct bt_conn *active_conn;
 
 /*
  * Scratch for one Sync, owned solely by the sync thread. The record set is
- * materialised here by collect() (up to the whole Buffer), then encoded a
+ * materialised here by sync_collect() (up to the whole Buffer), then encoded a
  * notification at a time into ntf_payload. Static, not on the thread stack:
  * together they are ~34 KB. ntf_payload is sized for the largest configured
  * notification so a runtime MTU (never larger) always fits.
  */
-static struct sync_record sync_records[BUFFER_CAPACITY];
+static struct aged_sample sync_records[BUFFER_CAPACITY];
 static uint8_t ntf_payload[CONFIG_BT_L2CAP_TX_MTU - ATT_NTF_OVERHEAD];
+
+/* sync_collect() trims *after* snapshotting the Buffer, so a scratch smaller
+ * than the ring would drop the newest Samples before the trim saw them. */
+BUILD_ASSERT(ARRAY_SIZE(sync_records) >= BUFFER_CAPACITY,
+	     "Sync scratch must span the whole Buffer");
 
 static ssize_t read_pod_id(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			   void *buf, uint16_t len, uint16_t offset)
@@ -372,12 +377,13 @@ static void sync_thread_run(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Compute the record set under the lock so collect() never reads
+		/* Compute the record set under the lock so sync_collect() never reads
 		 * a Buffer the sampler is mid-write on; release before the slow
 		 * notify streaming so a Sample tick isn't stalled by it. */
 		k_mutex_lock(sync_buffer_lock, K_FOREVER);
-		size_t count = buffer_collect(sync_buffer, latch_uptime, mark,
-					      sync_records, BUFFER_CAPACITY);
+		size_t count = sync_collect(sync_buffer, latch_uptime, mark,
+					    SAMPLE_INTERVAL_SEC, sync_records,
+					    BUFFER_CAPACITY);
 		k_mutex_unlock(sync_buffer_lock);
 
 		stream_batch(conn, count);
