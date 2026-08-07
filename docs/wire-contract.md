@@ -24,8 +24,8 @@ Ordering rationale is `docs/adr/0002-oldest-first-sync-transfer.md`.
 
 Written by the client to the Sync control characteristic to begin a Sync. It carries the
 client's **High-water mark**: the Age of the newest Sample the client already holds for this
-Pod. Writing it begins a Sync: the Pod selects the record set and, immediately before reading
-the Buffer, fixes the single **Latched read instant** those records' Ages are measured against.
+Pod. Writing it begins a Sync: the Pod first fixes which Samples the batch contains, then fixes
+the single **Latched read instant** those records' Ages are measured against.
 
 | Offset | Field  | Type   | Units   | Notes                                                     |
 | -----: | ------ | ------ | ------- | --------------------------------------------------------- |

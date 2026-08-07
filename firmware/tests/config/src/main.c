@@ -1,7 +1,7 @@
 /*
  * Host ztests for the firmware's project parameters (ticket 14b): the Sample
- * interval and the Buffer's retention target, and the ring capacity derived
- * from them. These are product decisions, not Buffer facts — the ring is a dumb
+ * interval and the Buffer's retention target, and the Sample count derived from
+ * them. These are product decisions, not Buffer facts — the ring is a dumb
  * container that is handed a capacity — so the derivation is asserted here, at
  * the configuration layer that owns it, rather than in tests/buffer/.
  *
@@ -18,15 +18,15 @@
 #include "app_config.h"
 
 /*
- * The capacity each configured cadence must derive, stated as a concrete Sample
- * count so the assertions below cannot degenerate into restating the formula.
+ * The Sample count each configured cadence must derive, stated as a concrete
+ * number so the assertions below cannot degenerate into restating the formula.
  */
 #if CONFIG_KUUKI_SAMPLE_INTERVAL_SEC == 900
-#define EXPECTED_CAPACITY 2880 /* 30 days / 15 min */
+#define EXPECTED_SAMPLES 2880 /* 30 days / 15 min */
 #elif CONFIG_KUUKI_SAMPLE_INTERVAL_SEC == 300
-#define EXPECTED_CAPACITY 8640 /* 30 days / 5 min */
+#define EXPECTED_SAMPLES 8640 /* 30 days / 5 min */
 #else
-#error "No expected capacity for this Sample interval; add one alongside the twister scenario"
+#error "No expected Sample count for this Sample interval; add one alongside the twister scenario"
 #endif
 
 ZTEST_SUITE(config, NULL, NULL, NULL, NULL, NULL);
@@ -47,14 +47,15 @@ ZTEST(config, test_v1_defaults)
 #endif
 
 /*
- * Capacity is derived, never a hard-coded Sample count: at whichever cadence is
- * configured, the ring holds exactly the Samples that span the retention target.
+ * The Sample count is derived, never hard-coded: at whichever cadence is
+ * configured, it is exactly the Samples that span the retention target. (The
+ * ring itself is this plus the Buffer's runway — see main.c.)
  */
-ZTEST(config, test_capacity_spans_the_retention_target)
+ZTEST(config, test_sample_count_spans_the_retention_target)
 {
-	zassert_equal(KUUKI_BUFFER_CAPACITY, EXPECTED_CAPACITY,
+	zassert_equal(KUUKI_RETENTION_SAMPLES, EXPECTED_SAMPLES,
 		      "the configured cadence derives its expected Sample count");
-	zassert_equal((size_t)KUUKI_BUFFER_CAPACITY * CONFIG_KUUKI_SAMPLE_INTERVAL_SEC,
+	zassert_equal((size_t)KUUKI_RETENTION_SAMPLES * CONFIG_KUUKI_SAMPLE_INTERVAL_SEC,
 		      CONFIG_KUUKI_RETENTION_SEC,
-		      "capacity must span the whole retention target");
+		      "the Sample count must span the whole retention target");
 }

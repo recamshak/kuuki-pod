@@ -5,9 +5,9 @@
  *
  * This suite exists to prove the native_sim ztest harness builds and runs
  * green on a developer's laptop, with no hardware attached. Real
- * correctness-critical modules (the Buffer collect() query, ticket 04, and
- * friends) are added as pure sources and exercised by suites shaped like this
- * one — inputs to outputs, never internal representation.
+ * correctness-critical modules (the ring Buffer, ticket 04, and friends) are
+ * added as pure sources and exercised by suites shaped like this one — inputs
+ * to outputs, never internal representation.
  */
 
 #include <zephyr/ztest.h>

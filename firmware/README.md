@@ -8,8 +8,8 @@ for the spec.
 It boots, then logs the SCD40 into the in-RAM Buffer at each Sample tick (a
 project parameter, 15 min by default); the sensor runs in low-power periodic mode
 on I²C, and the BLE GATT service serves the Pod ID, the Live reading, and Syncs
-of the Buffer. Correctness-critical logic — the Buffer snapshot, the Sync
-`sync_collect()` query, and the Measurement→Sample scaling — is developed
+of the Buffer. Correctness-critical logic — the Buffer's frozen iteration, the
+Sync record selection, and the Measurement→Sample scaling — is developed
 off-board as pure modules under `tests/`, run on the host via `native_sim`; the
 SCD40 I²C bring-up and the sampling loop are hardware-verified.
 
@@ -25,15 +25,19 @@ the modules that use them:
 
 `src/app_config.h` derives the ring's capacity in Samples from the two
 (`retention / interval`, which must divide evenly); `main.c` owns the backing
-array sized from it and hands it to `buffer_init()`. Changing the interval
-therefore resizes the ring instead of shortening the span it covers. Override
-either at build time, e.g.
+array, sized from that plus the Buffer's 4-slot runway, and hands it to
+`buffer_init()`. Changing the interval therefore resizes the ring instead of
+shortening the span it covers. Override either at build time, e.g.
 `west build -b xiao_ble . -- -DCONFIG_KUUKI_SAMPLE_INTERVAL_SEC=300`.
 
-Mind the RAM: the ring is paid for twice (the Buffer plus `ble.c`'s Sync
-scratch) at 12 bytes per Sample, so the defaults' 2880 Samples cost ~69 KB of
-the nRF52840's 256 KB — 43% of RAM in total — and a 5-minute tick takes that
-to 96%.
+Mind the RAM: the ring is paid for once at 12 bytes per Sample — a Sync streams
+straight out of it — so the defaults' 2884 slots cost ~34 KB and the firmware
+links at 30% of the nRF52840's 256 KB; a 5-minute tick takes that to 56%.
+
+The Sample tick also has a floor the Buffer imposes: its runway buys
+`runway × interval` of stall tolerance for the lock-free Sync reader, and a
+`BUILD_ASSERT` in `src/app_config.h` fails the build below 80 s
+(`docs/adr/0005-lock-free-buffer-with-runway.md`).
 
 ## Prerequisites
 

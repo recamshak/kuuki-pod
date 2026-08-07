@@ -6,8 +6,8 @@ project(kuuki_pod_sync_test)
 
 # The whole Sync seam is pure: compile the production sources straight into the
 # host test binary and exercise them through their public API. buffer.c comes
-# along because sync_collect() answers a Sync over a real Buffer — the trim is
-# tested through the Buffer's public snapshot, never a stubbed one.
+# along because a Sync iterator wraps a real Buffer iterator — the trim and the
+# Age arithmetic are tested over a real ring, never a stubbed one.
 set(KUUKI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_include_directories(app PRIVATE ${KUUKI_SRC})
 target_sources(app PRIVATE

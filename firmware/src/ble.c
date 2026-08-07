@@ -21,7 +21,6 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
-#include "app_config.h"
 #include "ble.h"
 #include "buffer.h"
 #include "live.h"
@@ -65,12 +64,12 @@ static uint8_t live_value[LIVE_READING_SIZE];
 static bool live_notify_enabled;
 
 /*
- * Sync (ticket 07) state. The Buffer and its lock are borrowed from the
- * application for the Pod's lifetime; sync_collect() reads the Buffer under the lock
- * so the sampler's concurrent buffer_put() is never observed half-written.
+ * Sync (ticket 07) state. The Buffer is borrowed from the application for the
+ * Pod's lifetime and read lock-free: a Sync freezes the ring's write head once
+ * and walks what was there, behind the runway that keeps the sampler off the
+ * reader's slot (ADR-0005).
  */
 static struct buffer *sync_buffer;
-static struct k_mutex *sync_buffer_lock;
 
 /* Whether a client has subscribed to Sync data notifications. */
 static bool sync_notify_enabled;
@@ -97,13 +96,11 @@ static K_SEM_DEFINE(sync_pending, 0, 1);
 static struct bt_conn *active_conn;
 
 /*
- * Scratch for one Sync, owned solely by the sync thread. The record set is
- * materialised here by sync_collect() (up to the whole Buffer), then encoded a
- * notification at a time into ntf_payload. Static, not on the thread stack:
- * together they are ~35 KB. ntf_payload is sized for the largest configured
- * notification so a runtime MTU (never larger) always fits.
+ * Payload for one Sync notification, owned solely by the sync thread. Records
+ * are encoded into it straight off the Buffer iterator — there is no scratch
+ * copy of the batch. Static, not on the thread stack; sized for the largest
+ * configured notification so a runtime MTU (never larger) always fits.
  */
-static struct aged_sample sync_records[KUUKI_BUFFER_CAPACITY];
 static uint8_t ntf_payload[CONFIG_BT_L2CAP_TX_MTU - ATT_NTF_OVERHEAD];
 
 static ssize_t read_pod_id(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -132,9 +129,9 @@ static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 /*
  * A client begins a Sync by writing its High-water mark (a 4-byte Age, or the
  * sentinel) to the Sync control characteristic. We publish the mark and wake the
- * sync thread, which latches the batch's read instant, computes the record set
- * and streams it. The write returns immediately; the potentially long notify
- * stream runs off this thread.
+ * sync thread, which freezes the batch, latches its read instant and streams it
+ * straight out of the ring. The write returns immediately; the potentially long
+ * notify stream runs off this thread.
  */
 static ssize_t write_sync_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				  const void *buf, uint16_t len, uint16_t offset,
@@ -297,12 +294,30 @@ static int sync_notify(struct bt_conn *conn, const void *data, uint16_t len)
 }
 
 /*
- * Encode the count collected records into notifications and stream them
- * oldest-first over conn, packing as many whole records per notification as the
- * negotiated MTU allows, then send the zero-length end-of-batch marker. count
- * may be 0 — an up-to-date client gets only the marker (a valid, empty Sync).
+ * Send the `packed` records sitting in ntf_payload as one notification and add
+ * them to *sent. Returns false if the stream died: the batch is then left
+ * unterminated, which is exactly the client's "incomplete Sync" signal.
  */
-static void stream_batch(struct bt_conn *conn, size_t count)
+static bool flush_records(struct bt_conn *conn, size_t packed, size_t *sent)
+{
+	if (sync_notify(conn, ntf_payload, packed * RECORD_SIZE)) {
+		LOG_WRN("Sync stream interrupted after %zu records; "
+			"next Sync self-heals", *sent);
+		return false;
+	}
+
+	*sent += packed;
+	return true;
+}
+
+/*
+ * Drain a Sync into notifications and stream them oldest-first over conn,
+ * packing as many whole records per notification as the negotiated MTU allows,
+ * then send the zero-length end-of-batch marker. The iterator may yield nothing
+ * — an up-to-date client gets only the marker (a valid, empty Sync). Which
+ * records it yields is entirely sync_iter's business; this only chunks them.
+ */
+static void stream_batch(struct bt_conn *conn, struct sync_iter *records)
 {
 	uint16_t mtu = bt_gatt_get_mtu(conn);
 	size_t per_ntf = sync_records_per_notification(mtu);
@@ -312,19 +327,25 @@ static void stream_batch(struct bt_conn *conn, size_t count)
 		return;
 	}
 
-	for (size_t sent = 0; sent < count; sent += per_ntf) {
-		size_t chunk = MIN(per_ntf, count - sent);
+	size_t sent = 0;
+	size_t packed = 0;
+	struct sync_record r;
 
-		for (size_t i = 0; i < chunk; i++) {
-			sync_encode_record(&sync_records[sent + i],
-					   &ntf_payload[i * RECORD_SIZE]);
+	while (sync_iter_next(records, &r)) {
+		sync_encode_record(&r, &ntf_payload[packed * RECORD_SIZE]);
+
+		/* Only the last notification of a batch may be short. */
+		if (++packed < per_ntf) {
+			continue;
 		}
-
-		if (sync_notify(conn, ntf_payload, chunk * RECORD_SIZE)) {
-			LOG_WRN("Sync stream interrupted after %zu/%zu records; "
-				"next Sync self-heals", sent, count);
+		if (!flush_records(conn, packed, &sent)) {
 			return;
 		}
+		packed = 0;
+	}
+
+	if (packed > 0 && !flush_records(conn, packed, &sent)) {
+		return;
 	}
 
 	if (sync_notify(conn, ntf_payload, 0)) {
@@ -332,7 +353,7 @@ static void stream_batch(struct bt_conn *conn, size_t count)
 		return;
 	}
 
-	LOG_INF("Sync complete: %zu records streamed", count);
+	LOG_INF("Sync complete: %zu records streamed", sent);
 }
 
 static void sync_thread_run(void *p1, void *p2, void *p3)
@@ -362,27 +383,24 @@ static void sync_thread_run(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Compute the record set under the Buffer lock so sync_collect()
-		 * never reads a Buffer the sampler is mid-write on; release before
-		 * the slow notify streaming so a Sample tick isn't stalled by it.
-		 *
-		 * The batch's one read instant is latched here — inside the lock,
-		 * immediately before the read. The sampler stamps a Sample's
-		 * capture time before taking this same lock, so every Sample this
-		 * collect can see was captured before we latched, and the unsigned
-		 * Age subtraction cannot wrap. Latching earlier (in the control
-		 * write, say) would leave a window in which a Sample tick lands
-		 * with a capture time newer than the latch, aging it into the
-		 * future. */
-		k_mutex_lock(sync_buffer_lock, K_FOREVER);
+		/* Freeze the batch, then latch, then wrap up — in that order,
+		 * which is why all three sit here rather than inside sync.c.
+		 * buffer_iter_init() fixes which Samples this Sync contains with
+		 * one acquire load; the monotonic clock read that follows is
+		 * therefore at or after every capture time in the batch, so the
+		 * unsigned Age subtraction cannot wrap. A Sample tick landing
+		 * from here on is simply outside the frozen batch and lands in
+		 * the next Sync. No lock is taken and none is needed: the
+		 * runway keeps the sampler off the slot we are reading
+		 * (ADR-0005). */
+		struct buffer_iter frozen;
+		buffer_iter_init(&frozen, sync_buffer);
 		uint32_t latch_uptime = (uint32_t)(k_uptime_get() / 1000);
-		size_t count = sync_collect(sync_buffer, latch_uptime, sync_mark,
-					    CONFIG_KUUKI_SAMPLE_INTERVAL_SEC,
-					    sync_records,
-					    ARRAY_SIZE(sync_records));
-		k_mutex_unlock(sync_buffer_lock);
+		struct sync_iter records;
+		sync_iter_init(&records, &frozen, latch_uptime, sync_mark,
+			       CONFIG_KUUKI_SAMPLE_INTERVAL_SEC);
 
-		stream_batch(conn, count);
+		stream_batch(conn, &records);
 		bt_conn_unref(conn);
 	}
 }
@@ -397,24 +415,9 @@ void ble_live_update(const struct sample *s)
 	}
 }
 
-int ble_start(struct buffer *buf, struct k_mutex *buf_lock)
+int ble_start(struct buffer *buf)
 {
-	/* sync_collect() trims *after* snapshotting the Buffer, so a scratch
-	 * smaller than the ring would discard the newest Samples before the trim
-	 * ever saw them — a Sync could answer with nothing while unsent Samples
-	 * remain. Both the scratch and the application's ring are sized from
-	 * KUUKI_BUFFER_CAPACITY, so this is unreachable today; it is the tripwire
-	 * if a caller ever hands us a ring sized any other way. Refuse rather
-	 * than serve Syncs that silently lose Samples. */
-	if (buffer_capacity(buf) > ARRAY_SIZE(sync_records)) {
-		LOG_ERR("Buffer holds %zu Samples but the Sync scratch spans %zu; "
-			"refusing to serve lossy Syncs", buffer_capacity(buf),
-			ARRAY_SIZE(sync_records));
-		return -EINVAL;
-	}
-
 	sync_buffer = buf;
-	sync_buffer_lock = buf_lock;
 
 	int err = bt_enable(NULL);
 	if (err) {

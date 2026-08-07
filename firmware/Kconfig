@@ -30,7 +30,8 @@ config KUUKI_RETENTION_SEC
 	  How far back the in-RAM Buffer keeps Samples before overwriting its
 	  oldest. 2592000 (30 days) is the v1 target. Must be a whole number of
 	  Sample intervals; the resulting ring costs 12 bytes of RAM per Sample,
-	  twice over (the Buffer itself and the Sync scratch that snapshots it).
+	  paid once — a Sync streams straight out of the ring, with no second
+	  copy of it.
 
 endmenu
 
