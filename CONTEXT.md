@@ -50,11 +50,11 @@ The Pod's most recent Measurement (current CO₂/temp/humidity), exposed as its 
 _Avoid_: current sample, latest sample
 
 **Age**:
-A Sample's offset (in the past) from the single read instant latched at the start of a Sync — e.g. "780 seconds ago". The Pod sends Age; the webapp converts it to wall-clock time via `Date.now() − Age`. The Pod itself has no notion of wall-clock time.
+A Sample's offset (in the past) from its Sync's single **Latched read instant** — e.g. "780 seconds ago". The Pod sends Age; the webapp converts it to wall-clock time via `Date.now() − Age`. The Pod itself has no notion of wall-clock time.
 _Avoid_: timestamp, offset, delta
 
 **Latched read instant**:
-The one reference "now" the Pod fixes at the start of a Sync, against which every Age in that batch is measured. Latched once per Sync so transfer latency shifts the whole series uniformly instead of smearing it.
+The one reference "now" the Pod fixes for a Sync, against which every Age in that batch is measured. Latched once per Sync so transfer latency shifts the whole series uniformly instead of smearing it. Taken once the Pod has fixed which Samples the batch contains — not when the client's request arrives — so no Sample in the batch can be newer than the instant and no Age can run backwards.
 
 **High-water mark**:
 The Age of the client's newest already-known Sample, sent *to* the Pod at the start of a Sync (Age flows both directions). The Pod returns only Samples newer than the matched 15-min slot; a sentinel value means "I have nothing, send everything." The mark is a bandwidth optimization only — it is not persisted on the Pod and correctness never depends on it.

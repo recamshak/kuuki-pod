@@ -76,17 +76,15 @@ static struct k_mutex *sync_buffer_lock;
 static bool sync_notify_enabled;
 
 /*
- * The pending Sync's parameters, published by the Sync control write and
- * consumed by the sync thread. latch_uptime is the single Latched read instant
- * for the batch (CONTEXT.md): every record's Age is measured against it. The two
- * fields are written and snapshotted as a unit under the scheduler lock, so a
- * second control write racing the consumer can never split a new latch onto an
- * old mark — last write wins, and a client Syncs one batch at a time anyway.
+ * The pending Sync's High-water mark, published by the Sync control write and
+ * consumed by the sync thread. Unlocked: one aligned 32-bit word has nothing to
+ * tear, and the semaphore below orders the handoff — the compiler can neither
+ * sink the store past k_sem_give() nor hoist the load above k_sem_take(), and
+ * on this single core the compiler is the only reordering adversary (ADR-0005).
+ * A second control write racing the consumer simply wins, and a client Syncs
+ * one batch at a time anyway.
  */
-static struct {
-	uint32_t latch_uptime;
-	uint32_t mark;
-} sync_request;
+static uint32_t sync_mark;
 
 /* Signals the sync thread that a Sync control write is pending. */
 static K_SEM_DEFINE(sync_pending, 0, 1);
@@ -133,10 +131,10 @@ static void live_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 
 /*
  * A client begins a Sync by writing its High-water mark (a 4-byte Age, or the
- * sentinel) to the Sync control characteristic. We latch exactly one read
- * instant for the whole batch here — the moment of the write — and hand the mark
- * to the sync thread, which computes and streams the record set. The write
- * returns immediately; the potentially long notify stream runs off this thread.
+ * sentinel) to the Sync control characteristic. We publish the mark and wake the
+ * sync thread, which latches the batch's read instant, computes the record set
+ * and streams it. The write returns immediately; the potentially long notify
+ * stream runs off this thread.
  */
 static ssize_t write_sync_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				  const void *buf, uint16_t len, uint16_t offset,
@@ -153,13 +151,7 @@ static ssize_t write_sync_control(struct bt_conn *conn, const struct bt_gatt_att
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 
-	/* Latch the single read instant for this batch before anything else, so
-	 * transfer latency shifts the whole series uniformly (CONTEXT.md). Publish
-	 * it with the mark as a unit, so the sync thread never reads a torn pair. */
-	k_sched_lock();
-	sync_request.latch_uptime = (uint32_t)(k_uptime_get() / 1000);
-	sync_request.mark = sys_get_le32(buf);
-	k_sched_unlock();
+	sync_mark = sys_get_le32(buf);
 
 	k_sem_give(&sync_pending);
 
@@ -358,14 +350,11 @@ static void sync_thread_run(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Snapshot the pending request and take our own reference to the
-		 * connection as one unit: under the scheduler lock neither the
-		 * control write (updating the request) nor the disconnect callback
-		 * (freeing the connection) can run mid-snapshot. Our own ref keeps
-		 * the connection alive even if it drops mid-stream. */
+		/* Take our own reference to the connection under the scheduler
+		 * lock, so the disconnect callback cannot free it mid-grab; the
+		 * ref then keeps the connection alive even if the link drops
+		 * mid-stream. */
 		k_sched_lock();
-		uint32_t latch_uptime = sync_request.latch_uptime;
-		uint32_t mark = sync_request.mark;
 		struct bt_conn *conn = active_conn ? bt_conn_ref(active_conn) : NULL;
 		k_sched_unlock();
 
@@ -373,11 +362,21 @@ static void sync_thread_run(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Compute the record set under the lock so sync_collect() never reads
-		 * a Buffer the sampler is mid-write on; release before the slow
-		 * notify streaming so a Sample tick isn't stalled by it. */
+		/* Compute the record set under the Buffer lock so sync_collect()
+		 * never reads a Buffer the sampler is mid-write on; release before
+		 * the slow notify streaming so a Sample tick isn't stalled by it.
+		 *
+		 * The batch's one read instant is latched here — inside the lock,
+		 * immediately before the read. The sampler stamps a Sample's
+		 * capture time before taking this same lock, so every Sample this
+		 * collect can see was captured before we latched, and the unsigned
+		 * Age subtraction cannot wrap. Latching earlier (in the control
+		 * write, say) would leave a window in which a Sample tick lands
+		 * with a capture time newer than the latch, aging it into the
+		 * future. */
 		k_mutex_lock(sync_buffer_lock, K_FOREVER);
-		size_t count = sync_collect(sync_buffer, latch_uptime, mark,
+		uint32_t latch_uptime = (uint32_t)(k_uptime_get() / 1000);
+		size_t count = sync_collect(sync_buffer, latch_uptime, sync_mark,
 					    CONFIG_KUUKI_SAMPLE_INTERVAL_SEC,
 					    sync_records,
 					    ARRAY_SIZE(sync_records));
@@ -424,7 +423,8 @@ int ble_start(struct buffer *buf, struct k_mutex *buf_lock)
 	}
 
 	/* The sync thread streams a Sync off the BLE RX path: the Sync control
-	 * write only latches and signals, so a long stream never blocks it. */
+	 * write only publishes the mark and signals, so a long stream never
+	 * blocks it. */
 	k_thread_create(&sync_thread, sync_stack, SYNC_STACK_SIZE, sync_thread_run,
 			NULL, NULL, NULL, SYNC_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&sync_thread, "ble_sync");
