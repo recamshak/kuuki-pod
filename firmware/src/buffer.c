@@ -13,8 +13,7 @@ void buffer_init(struct buffer *buf, struct sample *storage, size_t capacity)
 {
 	buf->samples = storage;
 	buf->capacity = capacity;
-	buf->next = 0;
-	buf->count = 0;
+	buf->written = 0;
 }
 
 size_t buffer_capacity(const struct buffer *buf)
@@ -24,22 +23,23 @@ size_t buffer_capacity(const struct buffer *buf)
 
 void buffer_put(struct buffer *buf, const struct sample *s)
 {
-	buf->samples[buf->next] = *s;
-	buf->next = (buf->next + 1) % buf->capacity;
-
-	if (buf->count < buf->capacity) {
-		buf->count++;
-	}
-	/* Once full, `next` has advanced onto the oldest Sample, so the next
-	 * put() overwrites it — the ring keeps the most recent `capacity`. */
+	buf->samples[buf->written % buf->capacity] = *s;
+	buf->written++;
+	/* The head only ever climbs: once it has come round onto the oldest
+	 * Sample, the next put() overwrites it — the ring keeps the most
+	 * recent `capacity`. */
 }
 
 size_t buffer_snapshot(const struct buffer *buf, uint32_t latch_uptime,
 		       struct aged_sample *out, size_t out_cap)
 {
-	/* The oldest stored Sample sits `count` slots behind `next`. */
-	size_t oldest = (buf->next + buf->capacity - buf->count) % buf->capacity;
-	size_t n = buf->count < out_cap ? buf->count : out_cap;
+	/* Both positions derive from the one count, so they cannot disagree:
+	 * the ring holds every write until it fills and `capacity` after, and
+	 * the oldest Sample it holds sits that many writes behind the head. */
+	size_t stored = buf->written < buf->capacity ? buf->written
+						     : buf->capacity;
+	size_t oldest = (buf->written - stored) % buf->capacity;
+	size_t n = stored < out_cap ? stored : out_cap;
 
 	for (size_t i = 0; i < n; i++) {
 		const struct sample *s =

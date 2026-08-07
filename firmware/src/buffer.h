@@ -51,12 +51,18 @@ struct aged_sample {
  * storage; once full, buffer_put() overwrites the oldest so it always holds the
  * most recent `capacity` of them. Fields are internal — tests must exercise
  * behaviour through the functions below, never this layout.
+ *
+ * Its position is one monotonic count of Samples ever written — the write head
+ * — never a write-index / stored-count pair, so the two can never disagree
+ * about where the ring starts. The count is a fixed 32 bits rather than a
+ * size_t so the ring behaves identically on the 32-bit device and in the host
+ * test build; it wraps after 2^32 writes, which is over a century even if a
+ * Sample were written every second.
  */
 struct buffer {
 	struct sample *samples; /* borrowed storage, `capacity` Samples long */
 	size_t capacity;        /* slots in `samples`, > 0 */
-	size_t next;            /* index the next Sample will be written to */
-	size_t count;           /* Samples currently stored, ≤ capacity */
+	uint32_t written;       /* Samples ever written — the write head */
 };
 
 /*
