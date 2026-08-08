@@ -1,10 +1,10 @@
 /*
- * Pure view-support logic for the one-screen dashboard (ticket 10).
+ * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a).
  *
  * The Svelte shell and the uPlot wrapper are the untestable seams; everything
  * with a decision in it lives here, under test: how a CO₂ number maps to a
- * colour band, which time windows the range selector offers, how a window is
- * applied to History, and how stored Samples become uPlot's column arrays.
+ * colour band, which slice of time the chart shows and when that window follows
+ * fresh data, and how stored Samples become uPlot's column arrays.
  *
  * No DOM, no Bluetooth, no framework — Samples in, plain values out.
  */
@@ -40,30 +40,41 @@ export function co2Band(co2: number): Co2Band {
   return BANDS.good;
 }
 
-/** A selectable chart window: a label and its span in milliseconds. */
-export interface Range {
-  label: string;
-  ms: number;
+/**
+ * The chart's View: the visible x-range, in unix seconds (uPlot's time convention). The
+ * whole History is always fed to the chart, so the View — never a pre-sliced subset of
+ * Samples — is what the user sees.
+ */
+export interface ChartView {
+  min: number;
+  max: number;
 }
 
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
+/** The span the chart opens on and resets to: the last 24 h, the primary overnight View. */
+export const DEFAULT_VIEW_SPAN_S = 24 * 3600;
 
-/** The range choices, from a single night up to a week (spec: "a night to several days"). */
-export const RANGES: readonly Range[] = [
-  { label: 'Night', ms: 12 * HOUR },
-  { label: '24h', ms: DAY },
-  { label: '3d', ms: 3 * DAY },
-  { label: 'Week', ms: 7 * DAY },
-];
+/** The View the chart opens on and returns to: the last 24 h, right edge at `nowMs`. */
+export function defaultView(nowMs: number): ChartView {
+  const now = nowMs / 1000;
+  return { min: now - DEFAULT_VIEW_SPAN_S, max: now };
+}
 
 /**
- * The Samples falling within the last `windowMs` before `nowMs`, order preserved.
- * History is oldest-first, so the result is too.
+ * Where the view goes when a Merge appends Samples: forward with the data if the view
+ * was parked at the live edge (its right edge at or past the newest Sample), keeping
+ * its span and its distance from that edge. A view panned into the past is returned
+ * as-is — a background Merge must never yank the viewport. `x` values are unix seconds;
+ * a missing end (empty data) means there is nothing to follow.
  */
-export function selectRange(samples: Sample[], windowMs: number, nowMs: number): Sample[] {
-  const cutoff = nowMs - windowMs;
-  return samples.filter((s) => s.t >= cutoff);
+export function followLiveEdge(
+  view: ChartView,
+  newestBefore: number | undefined,
+  newestAfter: number | undefined,
+): ChartView {
+  if (newestBefore === undefined || newestAfter === undefined) return view;
+  const advanced = newestAfter - newestBefore;
+  if (advanced <= 0 || view.max < newestBefore) return view;
+  return { min: view.min + advanced, max: view.max + advanced };
 }
 
 /** uPlot's aligned column layout: [x, ...series], each an equal-length array. */

@@ -6,22 +6,14 @@
    * The whole multi-Pod lifecycle — known Pods keyed by ID, Live-reading fan-in,
    * disconnect handling, persistence load, persistent pairing, names, and the
    * connect/Sync/reconnect orchestration — lives in the tested `Fleet`. What remains
-   * here is pure presentation: a trivial `selectedId`, the range/temp/humidity
-   * preferences, the dashboard.ts transforms, text formatting, and the production
-   * FleetDeps wiring.
+   * here is pure presentation: a trivial `selectedId`, the dashboard.ts transforms,
+   * text formatting, and the production FleetDeps wiring.
    *   - Live reading  → CO₂-hero (colour-banded) + secondary temp/humidity.
-   *   - Per-Pod History → uPlot timeseries over a selectable range.
+   *   - Per-Pod History → uPlot timeseries, whole History in, view owned by the chart.
    */
   import Chart from "./lib/Chart.svelte";
   import PodPicker from "./lib/PodPicker.svelte";
-  import {
-    co2Band,
-    RANGES,
-    selectRange,
-    toPlotData,
-    type PlotData,
-    type Range,
-  } from "./lib/dashboard";
+  import { co2Band, toPlotData, type PlotData } from "./lib/dashboard";
   import { deleteHistory, History, listPodIds } from "./lib/history";
   import { Fleet } from "./lib/fleet";
   import { Names } from "./lib/names";
@@ -62,10 +54,6 @@
     if (podId === selected?.id) historyVersion++;
   };
   fleet.onChange = () => stateVersion++;
-
-  let range = $state<Range>(RANGES[1]); // default to 24h
-  let showTemp = $state(false);
-  let showHumidity = $state(false);
 
   // The rich Pod view, re-read after every fleet change; everything the hero, chart
   // and picker show is read off `selected`, one object out of this list.
@@ -115,12 +103,11 @@
 
   const band = $derived(live ? co2Band(live.co2) : null);
 
+  // The chart is fed the whole History (ticket 16a): no slicing here, the visible
+  // window is the chart's own state.
   const plotData = $derived.by<PlotData>(() => {
     historyVersion; // establish the dependency: recompute after each Merge
-    if (!selectedHistory) return [[], [], [], []];
-    return toPlotData(
-      selectRange(selectedHistory.samples(), range.ms, Date.now()),
-    );
+    return selectedHistory ? toPlotData(selectedHistory.samples()) : [[], [], [], []];
   });
   const hasHistory = $derived(plotData[0].length > 0);
 
@@ -190,25 +177,12 @@
   {/if}
 
   <section class="chart-panel">
-    <div class="range">
-      {#each RANGES as r (r.label)}
-        <button
-          class:selected={r.label === range.label}
-          onclick={() => (range = r)}>{r.label}</button
-        >
-      {/each}
-      <label><input type="checkbox" bind:checked={showTemp} /> Temp</label>
-      <label
-        ><input type="checkbox" bind:checked={showHumidity} /> Humidity</label
-      >
-    </div>
     {#if hasHistory}
-      <Chart
-        data={plotData}
-        co2Color={band?.color ?? "#3fb950"}
-        {showTemp}
-        {showHumidity}
-      />
+      <!-- Keyed on the Pod: switching Pods is not a Merge, so the chart is rebuilt and
+           opens on its own 24 h-at-"now" rather than inheriting the last Pod's view. -->
+      {#key selected?.id}
+        <Chart data={plotData} co2Color={band?.color ?? "#3fb950"} />
+      {/key}
     {:else}
       <p class="notice muted">
         No history yet — connect a Pod to build the chart.
@@ -311,57 +285,11 @@
     font-variant-numeric: tabular-nums;
   }
 
-  button {
-    background: #21262d;
-    color: #e6edf3;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 0.5rem 1rem;
-    font-size: 0.95rem;
-    cursor: pointer;
-  }
-
-  button:hover:not(:disabled) {
-    background: #2a3038;
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
   .chart-panel {
     background: #0f141b;
     border: 1px solid #21262d;
     border-radius: 14px;
     padding: 1rem;
-  }
-
-  .range {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .range button {
-    padding: 0.3rem 0.7rem;
-    font-size: 0.85rem;
-  }
-
-  .range button.selected {
-    border-color: #58a6ff;
-    color: #58a6ff;
-  }
-
-  .range label {
-    font-size: 0.85rem;
-    opacity: 0.8;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    margin-left: 0.25rem;
   }
 
   .notice {

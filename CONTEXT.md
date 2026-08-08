@@ -63,3 +63,11 @@ _Avoid_: cursor, offset, checkpoint
 **Merge**:
 The webapp's idempotent folding of Synced Samples into its per-Pod History, keyed by 15-minute **slot** (each Sample snapped to its nearest quarter-hour, keyed by UTC epoch so DST never duplicates or drops slots; local time is only for display). Re-Syncing the same Sample is harmless. This — not the High-water mark — is what makes Syncs correct and repeatable.
 _Avoid_: import, sync (Sync is the transfer; Merge is the reconcile)
+
+**View**:
+The slice of time the chart currently shows: an x-range in unix seconds, owned by the chart itself (ticket 16a). The whole History is always fed to the chart, so the View — never a pre-sliced subset of Samples — is what "the range" means. It opens on, and resets to, the last 24 h with its right edge at "now"; gestures move it from there.
+_Avoid_: range selector, slice (the deleted range buttons pre-sliced Samples; a View only moves what is drawn)
+
+**Live edge**:
+The newest Sample in a History, and by extension a View parked with its right edge at or past that Sample. A Merge slides a View that is at the live edge forward with the fresh Samples; a View panned into the past is never moved.
+_Avoid_: latest, head

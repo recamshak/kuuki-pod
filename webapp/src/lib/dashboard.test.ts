@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { co2Band, RANGES, selectRange, toPlotData } from './dashboard';
+import { co2Band, defaultView, followLiveEdge, toPlotData } from './dashboard';
 import type { Sample } from './history';
 
-// Pure view-support logic for the dashboard (ticket 10). The Svelte shell is the
-// untestable seam; these are the decisions worth pinning down under test:
-// CO₂ colour-banding, range windowing, and the uPlot column transform.
+// Pure view-support logic for the dashboard (ticket 10, reworked in 16a). The Svelte
+// shell and the uPlot wrapper are the untestable seams; these are the decisions worth
+// pinning down under test: CO₂ colour-banding, the chart's visible window, and the
+// uPlot column transform.
 
 const T0 = 1_700_000_000_000;
 
@@ -37,32 +38,45 @@ describe('co2Band', () => {
   });
 });
 
-describe('selectRange', () => {
-  const samples = [
-    sample(T0 - 5 * 3_600_000, 600), // 5h ago
-    sample(T0 - 3 * 3_600_000, 700), // 3h ago
-    sample(T0 - 1 * 3_600_000, 800), // 1h ago
-  ];
+describe('defaultView', () => {
+  it('spans the last 24 h with its right edge at now, in unix seconds', () => {
+    expect(defaultView(T0)).toEqual({ min: T0 / 1000 - 24 * 3600, max: T0 / 1000 });
+  });
+});
 
-  it('keeps only Samples within the window, ending at now', () => {
-    const within = selectRange(samples, 4 * 3_600_000, T0);
-    expect(within.map((s) => s.co2)).toEqual([700, 800]);
+describe('followLiveEdge', () => {
+  // The chart's x is unix seconds; the view below ends at "now", the live edge.
+  const NOW = T0 / 1000;
+  const atEdge = { min: NOW - 24 * 3600, max: NOW };
+
+  it('slides the view forward by the new data when it was parked at the live edge', () => {
+    // Newest Sample was 5 min old; a Merge lands one 10 min into the "future" gap.
+    expect(followLiveEdge(atEdge, NOW - 300, NOW + 600)).toEqual({
+      min: atEdge.min + 900,
+      max: atEdge.max + 900,
+    });
   });
 
-  it('keeps everything when the window spans the whole History', () => {
-    expect(selectRange(samples, 24 * 3_600_000, T0)).toHaveLength(3);
+  it('counts a right edge sitting exactly on the newest Sample as the live edge', () => {
+    expect(followLiveEdge(atEdge, NOW, NOW + 900)).toEqual({
+      min: atEdge.min + 900,
+      max: atEdge.max + 900,
+    });
   });
 
-  it('returns empty when nothing falls inside the window', () => {
-    expect(selectRange(samples, 30 * 60_000, T0)).toEqual([]);
+  it('leaves a view panned into the past untouched', () => {
+    const panned = { min: NOW - 48 * 3600, max: NOW - 24 * 3600 };
+    expect(followLiveEdge(panned, NOW - 300, NOW + 600)).toBe(panned);
   });
 
-  it('offers selectable ranges from a night to several days', () => {
-    expect(RANGES.length).toBeGreaterThanOrEqual(3);
-    expect(RANGES.every((r) => r.ms > 0 && r.label.length > 0)).toBe(true);
-    // Spans at least a night (~12h) up to several days.
-    expect(Math.min(...RANGES.map((r) => r.ms))).toBeLessThanOrEqual(12 * 3_600_000);
-    expect(Math.max(...RANGES.map((r) => r.ms))).toBeGreaterThanOrEqual(3 * 24 * 3_600_000);
+  it('leaves the view untouched when a Merge brought no newer Sample', () => {
+    expect(followLiveEdge(atEdge, NOW - 300, NOW - 300)).toBe(atEdge);
+    expect(followLiveEdge(atEdge, NOW - 300, NOW - 900)).toBe(atEdge);
+  });
+
+  it('leaves the view untouched when either end of the data is missing', () => {
+    expect(followLiveEdge(atEdge, undefined, NOW)).toBe(atEdge);
+    expect(followLiveEdge(atEdge, NOW - 300, undefined)).toBe(atEdge);
   });
 });
 
