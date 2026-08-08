@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { co2Band, defaultView, followLiveEdge, toPlotData } from './dashboard';
+import { co2Band, defaultView, followLiveEdge, nearestX, toPlotData } from './dashboard';
 import type { Sample } from './history';
 
-// Pure view-support logic for the dashboard (ticket 10, reworked in 16a). The Svelte
-// shell and the uPlot wrapper are the untestable seams; these are the decisions worth
-// pinning down under test: CO₂ colour-banding, the chart's visible window, and the
-// uPlot column transform.
+// Pure view-support logic for the dashboard (ticket 10, reworked in 16a and 16b). The
+// Svelte shell and the uPlot wrapper are the untestable seams; these are the decisions
+// worth pinning down: CO₂ colour-banding, the chart's visible window, the Sample a
+// selection snaps to, and the uPlot column transform.
 
 const T0 = 1_700_000_000_000;
 
@@ -97,5 +97,28 @@ describe('toPlotData', () => {
 
   it('yields empty columns for empty History', () => {
     expect(toPlotData([])).toEqual([[], [], [], []]);
+  });
+});
+
+describe('nearestX', () => {
+  // Quarter-hour Samples, the x column a one-finger selection snaps into.
+  const xs = [1000, 1900, 2800, 3700];
+
+  it('snaps to the nearer of the two Samples straddling the point', () => {
+    expect(nearestX(xs, 2000)).toBe(1900);
+    expect(nearestX(xs, 2700)).toBe(2800);
+  });
+
+  it('snaps to the end Samples for a point outside the data', () => {
+    expect(nearestX(xs, 0)).toBe(1000);
+    expect(nearestX(xs, 99_999)).toBe(3700);
+  });
+
+  it('returns a Sample sitting exactly on the point', () => {
+    expect(nearestX(xs, 2800)).toBe(2800);
+  });
+
+  it('has nothing to snap to in an empty History', () => {
+    expect(nearestX([], 2000)).toBeUndefined();
   });
 });

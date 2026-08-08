@@ -71,3 +71,7 @@ _Avoid_: range selector, slice (the deleted range buttons pre-sliced Samples; a 
 **Live edge**:
 The newest Sample in a History, and by extension a View parked with its right edge at or past that Sample. A Merge slides a View that is at the live edge forward with the fresh Samples; a View panned into the past is never moved.
 _Avoid_: latest, head
+
+**Selection**:
+The one Sample the chart is currently pointing at, shown through uPlot's cursor: a vertical line, a dot per series, and the legend's values (ticket 16b). It is a Sample, not a pixel — it rides its Sample through a pan or a zoom — and it is sticky: a one-finger tap or scrub moves it, lifting pins it, and nothing ever clears it. It reads blank while its Sample sits outside the View.
+_Avoid_: hover, tooltip, highlight (there is no hover on a touch screen, and no tooltip DOM: the legend is the readout)

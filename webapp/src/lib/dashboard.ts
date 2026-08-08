@@ -1,10 +1,13 @@
 /*
- * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a).
+ * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a
+ * and 16b).
  *
- * The Svelte shell and the uPlot wrapper are the untestable seams; everything
- * with a decision in it lives here, under test: how a CO₂ number maps to a
- * colour band, which slice of time the chart shows and when that window follows
- * fresh data, and how stored Samples become uPlot's column arrays.
+ * The Svelte shell and the uPlot wrapper are the untestable seams; the decisions live
+ * in tested modules — this one and its gesture companion `gestures.ts`, which owns the
+ * touch state machine and the View's zoom-and-pan limits. Here: how a CO₂ number maps
+ * to a colour band, which slice of time the chart shows and when that window follows
+ * fresh data, which Sample a selection snaps to, and how stored Samples become uPlot's
+ * column arrays.
  *
  * No DOM, no Bluetooth, no framework — Samples in, plain values out.
  */
@@ -97,6 +100,28 @@ export function toPlotData(samples: Sample[]): PlotData {
     humidity.push(round2(s.humidity / 100));
   }
   return [xs, co2, temp, humidity];
+}
+
+/**
+ * The x of the Sample nearest `t` in an ascending x column — where a one-finger
+ * selection lands, so the cursor marks a real Sample rather than the gap the finger
+ * happened to cover. `undefined` when there are no Samples to snap to.
+ */
+export function nearestX(xs: number[], t: number): number | undefined {
+  if (xs.length === 0) return undefined;
+
+  let lo = 0;
+  let hi = xs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] < t) lo = mid + 1;
+    else hi = mid;
+  }
+
+  // `lo` is the first x at or after `t`; the one before it may still be nearer.
+  const after = xs[lo];
+  const before = lo > 0 ? xs[lo - 1] : after;
+  return t - before <= after - t ? before : after;
 }
 
 /** Round to 2 decimals, killing float dust from the centi-unit division. */
