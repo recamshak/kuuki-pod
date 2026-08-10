@@ -12,7 +12,14 @@
   import { untrack } from 'svelte';
   import uPlot from 'uplot';
   import 'uplot/dist/uPlot.min.css';
-  import { defaultView, followLiveEdge, nearestX, type ChartView, type PlotData } from './dashboard';
+  import {
+    defaultView,
+    followLiveEdge,
+    nearestX,
+    scaleDomains,
+    type ChartView,
+    type PlotData,
+  } from './dashboard';
   import { TouchGestures, widestView, type Finger, type GestureEffect, type PlotFrame } from './gestures';
 
   interface Props {
@@ -27,12 +34,17 @@
   let container: HTMLDivElement;
   let plot: uPlot | undefined;
   // What the plot currently holds and how it draws it: the x column (whose last entry
-  // is the live edge, and into which a selection snaps), the band colour CO₂ is drawn
-  // with, and the selected Sample's x. Plain variables, deliberately not reactive: all
-  // are written from effects or touch handlers and read from uPlot callbacks that must
-  // not re-run those effects. `untrack` is what tells svelte-check that capturing only
-  // the initial props here is the intent — the effects at the bottom keep them current.
+  // is the live edge, and into which a selection snaps), the y-domain each series is
+  // drawn against, the band colour CO₂ is drawn with, and the selected Sample's x.
+  // Plain variables, deliberately not reactive: all are written from effects or touch
+  // handlers and read from uPlot callbacks that must not re-run those effects.
+  // `untrack` is what tells svelte-check that capturing only the initial props here is
+  // the intent — the effects at the bottom keep them current.
   let plottedXs: number[] = untrack(() => data[0]);
+  // Recomputed once per Merge by the data effect below, never during a gesture: uPlot
+  // asks for a range on every re-range, and scanning three full columns on each frame
+  // of a pinch would be both wasteful and a decision living in this untestable seam.
+  let yDomains = untrack(() => scaleDomains(data));
   let strokeCo2 = untrack(() => co2Color);
   let selectedX: number | undefined;
 
@@ -51,7 +63,15 @@
         },
         { scale: '°C', side: 1, stroke: '#8b949e', grid: { show: false }, ticks: { stroke: '#21262d' } },
       ],
-      scales: { x: { time: true }, co2: {}, '°C': {}, '%RH': {} },
+      // Each y-scale rests on its Scale base and only a Merge can move it (ticket 17),
+      // so a pan or a pinch changes which slice of time is shown, never how tall a
+      // value looks. The domains are decided in `dashboard.ts`; here we only read them.
+      scales: {
+        x: { time: true },
+        co2: { range: () => yDomains.co2 },
+        '°C': { range: () => yDomains['°C'] },
+        '%RH': { range: () => yDomains['%RH'] },
+      },
       series: [
         {},
         // uPlot re-evaluates a stroke callback on every draw, so the band colour can
@@ -206,7 +226,9 @@
   });
 
   // Push the History a Merge just grew, keeping the view where it is — except at the live
-  // edge, where it slides forward with the fresh Samples.
+  // edge, where it slides forward with the fresh Samples. The one writer of the y-domain
+  // cache, so it can never go stale relative to the data it was computed from; setting
+  // the x-scale is also what makes uPlot ask the y-scales for their range again.
   $effect(() => {
     const next = data;
     const u = plot;
@@ -214,6 +236,7 @@
     const view = viewOf(u);
     const before = plottedXs.at(-1); // the live edge: the newest x the plot held
     plottedXs = next[0];
+    yDomains = scaleDomains(next);
     u.setData(next, false);
     if (view) u.setScale('x', followLiveEdge(view, before, plottedXs.at(-1)));
   });

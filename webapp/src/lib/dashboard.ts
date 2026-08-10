@@ -1,17 +1,20 @@
 /*
- * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a
- * and 16b).
+ * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a,
+ * 16b and 17).
  *
  * The Svelte shell and the uPlot wrapper are the untestable seams; the decisions live
  * in tested modules — this one and its gesture companion `gestures.ts`, which owns the
  * touch state machine and the View's zoom-and-pan limits. Here: how a CO₂ number maps
  * to a colour band, which slice of time the chart shows and when that window follows
- * fresh data, which Sample a selection snaps to, and how stored Samples become uPlot's
- * column arrays.
+ * fresh data, which Sample a selection snaps to, how stored Samples become uPlot's
+ * column arrays, and the y-domain each series is drawn against.
  *
- * No DOM, no Bluetooth, no framework — Samples in, plain values out.
+ * No DOM, no Bluetooth, no framework — Samples in, plain values out. The one import
+ * with a life outside this module is `uplot`, for its static `rangeNum` padding helper;
+ * it loads fine without a `document`, so this stays a plain node-testable module.
  */
 
+import uPlot from 'uplot';
 import type { Sample } from './history';
 
 /** A CO₂ colour band: the traffic-light verdict shown behind the hero number. */
@@ -100,6 +103,76 @@ export function toPlotData(samples: Sample[]): PlotData {
     humidity.push(round2(s.humidity / 100));
   }
   return [xs, co2, temp, humidity];
+}
+
+/** uPlot's key for each y-scale; also the axis label the series is drawn against. */
+export type ScaleKey = 'co2' | '°C' | '%RH';
+
+/** A y-domain in uPlot's `[min, max]` shape, ready to hand back from `scale.range`. */
+export type YDomain = [min: number, max: number];
+
+/**
+ * The **Scale base** of each series: the resting y-domain it is drawn against, chosen
+ * so the chart says something true about the quantity before any data arrives. It does
+ * not depend on the View, so a gesture only ever changes *which slice of time* is
+ * shown, never how tall a value looks.
+ *
+ * - CO₂ 400–2000 ppm: 400 is ambient outdoor air (the floor the SCD40 reports under
+ *   ADR-0003's ASC assumption); 2000 clears the poor threshold, so both band
+ *   boundaries stay in frame and the hero's colour always agrees with the line.
+ * - Humidity 0–100 %RH: its definitional range.
+ * - Temperature 18–24 °C: the band where "is this room comfortable?" is decided, so a
+ *   typical 1–3 °C overnight swing fills a useful share of the panel.
+ */
+const SCALE_BASES: Record<ScaleKey, YDomain> = {
+  co2: [400, 2000],
+  '°C': [18, 24],
+  '%RH': [0, 100],
+};
+
+/**
+ * uPlot's own padding multiple for a numeric y-scale: widen by a tenth of the span and
+ * snap outwards to a round number, so gridline labels stay legible and lines never
+ * graze the frame.
+ */
+const PAD_MULT = 0.1;
+
+/**
+ * The y-domain each series is drawn against: its Scale base, widened — never narrowed —
+ * on whichever side the *whole* History escapes it, out to a padded round number. The
+ * extent comes from every Sample in the columns, not the visible ones, so the domains
+ * are identical whatever the View is doing; only a Merge that breaks a record can move
+ * an axis. An empty, single-Sample or dead-flat History lands squarely on its base, so
+ * there is no degenerate zero-height case to special-case anywhere.
+ */
+export function scaleDomains(data: PlotData): Record<ScaleKey, YDomain> {
+  const [, co2, temp, humidity] = data;
+  return {
+    co2: widenToFit(SCALE_BASES.co2, co2),
+    '°C': widenToFit(SCALE_BASES['°C'], temp),
+    '%RH': widenToFit(SCALE_BASES['%RH'], humidity),
+  };
+}
+
+/**
+ * `base`, widened to hold every value in `column`. Padding is applied only to the
+ * escaping side: padding a side the data never reached would drift the floor below its
+ * base for no reason (430…780 → 390 ppm) and would lose the base entirely for a flat
+ * History (600…600 → 0 ppm).
+ */
+function widenToFit([baseLo, baseHi]: YDomain, column: number[]): YDomain {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of column) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (lo >= baseLo && hi <= baseHi) return [baseLo, baseHi];
+
+  // `rangeNum`'s return type admits nulls; falling back to the bare extent keeps the
+  // escaping Sample on screen, where falling back to the base would clip it away.
+  const [padLo, padHi] = uPlot.rangeNum(lo, hi, PAD_MULT, true);
+  return [lo < baseLo ? (padLo ?? lo) : baseLo, hi > baseHi ? (padHi ?? hi) : baseHi];
 }
 
 /**

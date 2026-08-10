@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { co2Band, defaultView, followLiveEdge, nearestX, toPlotData } from './dashboard';
+import {
+  CO2_THRESHOLDS,
+  co2Band,
+  defaultView,
+  followLiveEdge,
+  nearestX,
+  scaleDomains,
+  toPlotData,
+} from './dashboard';
 import type { Sample } from './history';
 
-// Pure view-support logic for the dashboard (ticket 10, reworked in 16a and 16b). The
-// Svelte shell and the uPlot wrapper are the untestable seams; these are the decisions
-// worth pinning down: CO₂ colour-banding, the chart's visible window, the Sample a
-// selection snaps to, and the uPlot column transform.
+// Pure view-support logic for the dashboard (ticket 10, reworked in 16a, 16b and 17).
+// The Svelte shell and the uPlot wrapper are the untestable seams; these are the
+// decisions worth pinning down: CO₂ colour-banding, the chart's visible window, the
+// Sample a selection snaps to, the uPlot column transform, and the y-domains each
+// series is drawn against.
 
 const T0 = 1_700_000_000_000;
 
@@ -120,5 +129,85 @@ describe('nearestX', () => {
 
   it('has nothing to snap to in an empty History', () => {
     expect(nearestX([], 2000)).toBeUndefined();
+  });
+});
+
+describe('scaleDomains', () => {
+  // The Scale base is a resting y-domain that does not depend on the View: a gesture
+  // only changes which slice of time is shown, never how tall a value looks. A base is
+  // widened — never narrowed — where the *whole* History escapes it (ticket 17).
+
+  /** A History from CO₂/temp/humidity triples, one Sample per quarter-hour. */
+  function history(rows: [co2: number, temp: number, humidity: number][]) {
+    return toPlotData(rows.map(([co2, temp, humidity], i) => sample(T0 + i * 900_000, co2, temp, humidity)));
+  }
+
+  it('rests on the bases when the whole History fits inside them', () => {
+    const d = scaleDomains(history([[430, 2100, 4790], [780, 2250, 5500]]));
+
+    expect(d.co2).toEqual([400, 2000]);
+    expect(d['°C']).toEqual([18, 24]);
+    expect(d['%RH']).toEqual([0, 100]);
+  });
+
+  it('widens only the side the History escapes, to a padded round number', () => {
+    // A 3100 ppm cooking spike lifts the ceiling; the floor stays on the base.
+    const d = scaleDomains(history([[405, 2100, 5000], [3100, 2100, 5000], [700, 2100, 5000]]));
+
+    expect(d.co2).toEqual([400, 3400]);
+  });
+
+  it('widens the floor when the History dips below the base', () => {
+    const d = scaleDomains(history([[380, 2100, 5000], [1500, 2100, 5000]]));
+
+    expect(d.co2).toEqual([200, 2000]);
+  });
+
+  it('widens both sides when the History escapes both', () => {
+    const d = scaleDomains(history([[380, 2100, 5000], [3100, 2100, 5000]]));
+
+    expect(d.co2).toEqual([100, 3400]);
+  });
+
+  it('applies the same rule to temperature and humidity', () => {
+    const d = scaleDomains(history([[600, 1550, 5000], [600, 2600, 10500]]));
+
+    // Temperature escapes 18–24 on both sides; humidity only above 100 %RH.
+    expect(d['°C']).toEqual([14, 28]);
+    expect(d['%RH']).toEqual([0, 111]);
+  });
+
+  it('derives the extent from every Sample, not from any visible slice', () => {
+    const spikeFirst = scaleDomains(history([[3100, 2100, 5000], [700, 2100, 5000]]));
+    const spikeLast = scaleDomains(history([[700, 2100, 5000], [3100, 2100, 5000]]));
+
+    expect(spikeFirst.co2).toEqual(spikeLast.co2);
+    expect(spikeFirst.co2[1]).toBe(3400);
+  });
+
+  it('rests on the bases for a single-Sample and for a dead-flat History', () => {
+    expect(scaleDomains(history([[600, 2100, 5000]])).co2).toEqual([400, 2000]);
+
+    const flat = scaleDomains(history([[600, 2100, 5000], [600, 2100, 5000], [600, 2100, 5000]]));
+    expect(flat.co2).toEqual([400, 2000]);
+    expect(flat['°C']).toEqual([18, 24]);
+    expect(flat['%RH']).toEqual([0, 100]);
+  });
+
+  it('rests on the bases for an empty History', () => {
+    const d = scaleDomains(toPlotData([]));
+
+    expect(d.co2).toEqual([400, 2000]);
+    expect(d['°C']).toEqual([18, 24]);
+    expect(d['%RH']).toEqual([0, 100]);
+  });
+
+  it('keeps both CO₂ band boundaries in frame at rest', () => {
+    // The hero's colour verdict must agree with the line's height: 800 fair and 1200
+    // poor both sit inside the drawn domain of a History that never escapes its base.
+    const [lo, hi] = scaleDomains(history([[430, 2100, 5000], [780, 2100, 5000]])).co2;
+
+    expect(lo).toBeLessThan(CO2_THRESHOLDS.fair);
+    expect(hi).toBeGreaterThan(CO2_THRESHOLDS.poor);
   });
 });

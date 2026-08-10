@@ -68,6 +68,10 @@ _Avoid_: import, sync (Sync is the transfer; Merge is the reconcile)
 The slice of time the chart currently shows: an x-range in unix seconds, owned by the chart itself (ticket 16a). The whole History is always fed to the chart, so the View — never a pre-sliced subset of Samples — is what "the range" means. It opens on, and resets to, the last 24 h with its right edge at "now"; gestures move it from there.
 _Avoid_: range selector, slice (the deleted range buttons pre-sliced Samples; a View only moves what is drawn)
 
+**Scale base**:
+The y-axis counterpart to the **View**: each series' resting y-domain, independent of what the chart is showing (ticket 17). CO₂ rests at 400–2000 ppm (both colour-band boundaries in frame), humidity at 0–100 %RH, temperature at 18–24 °C. A base is widened — never narrowed — on whichever side the *whole* History escapes it, out to a padded round number, so a record spike lifts the ceiling for the session and tonight's reading can be read against that record. Because the extent comes from every Sample and not the visible ones, a pan or a pinch can never move a y-axis; only a Merge that breaks a record can.
+_Avoid_: y-range, auto-scale, fixed axis (the base is a resting domain, not a hard limit)
+
 **Live edge**:
 The newest Sample in a History, and by extension a View parked with its right edge at or past that Sample. A Merge slides a View that is at the live edge forward with the fresh Samples; a View panned into the past is never moved.
 _Avoid_: latest, head
