@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CO2_RAMP,
   CO2_THRESHOLDS,
-  co2Band,
+  co2Color,
+  co2Verdict,
   defaultView,
   followLiveEdge,
   nearestX,
@@ -10,11 +12,11 @@ import {
 } from './dashboard';
 import type { Sample } from './history';
 
-// Pure view-support logic for the dashboard (ticket 10, reworked in 16a, 16b and 17).
-// The Svelte shell and the uPlot wrapper are the untestable seams; these are the
-// decisions worth pinning down: CO₂ colour-banding, the chart's visible window, the
-// Sample a selection snaps to, the uPlot column transform, and the y-domains each
-// series is drawn against.
+// Pure view-support logic for the dashboard (ticket 10, reworked in 16a, 16b, 17 and
+// 18). The Svelte shell and the uPlot wrapper are the untestable seams; these are the
+// decisions worth pinning down: the CO₂ verdict and its colour ramp, the chart's
+// visible window, the Sample a selection snaps to, the uPlot column transform, and the
+// y-domains each series is drawn against.
 
 const T0 = 1_700_000_000_000;
 
@@ -22,28 +24,106 @@ function sample(t: number, co2: number, temp = 2100, humidity = 5000): Sample {
   return { t, co2, temp, humidity };
 }
 
-describe('co2Band', () => {
+describe('co2Verdict', () => {
   it('is good below the fair threshold (~800 ppm)', () => {
-    expect(co2Band(420).level).toBe('good');
-    expect(co2Band(799).level).toBe('good');
+    expect(co2Verdict(420).level).toBe('good');
+    expect(co2Verdict(799).level).toBe('good');
   });
 
   it('is fair from 800 up to the poor threshold (~1200 ppm)', () => {
-    expect(co2Band(800).level).toBe('fair');
-    expect(co2Band(1199).level).toBe('fair');
+    expect(co2Verdict(800).level).toBe('fair');
+    expect(co2Verdict(1199).level).toBe('fair');
   });
 
   it('is poor at and above 1200 ppm', () => {
-    expect(co2Band(1200).level).toBe('poor');
-    expect(co2Band(2500).level).toBe('poor');
+    expect(co2Verdict(1200).level).toBe('poor');
+    expect(co2Verdict(2500).level).toBe('poor');
   });
 
-  it('carries a colour and a human label for each band', () => {
-    for (const co2 of [500, 1000, 1500]) {
-      const band = co2Band(co2);
-      expect(band.color).toMatch(/^#|rgb|hsl/);
-      expect(band.label.length).toBeGreaterThan(0);
+  it('gives each level its own human word for the hero', () => {
+    expect([500, 1000, 1500].map((ppm) => co2Verdict(ppm).label)).toEqual([
+      'Fresh',
+      'Stuffy',
+      'Poor',
+    ]);
+  });
+});
+
+describe('co2Color', () => {
+  // Colour is a pure function of the reading (ticket 18): the one ramp paints the hero
+  // number, the verdict word, and — as a gradient in value space — the chart's CO₂
+  // line, so no Sample's colour depends on the live reading or on the View.
+
+  const GREEN = '#3fb950';
+  const AMBER = '#d29922';
+  const RED = '#f85149';
+
+  function rgb(hex: string): [number, number, number] {
+    const n = Number.parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  it('is exact at all four anchors', () => {
+    expect(co2Color(400)).toBe(GREEN);
+    expect(co2Color(800)).toBe(GREEN);
+    expect(co2Color(1000)).toBe(AMBER);
+    expect(co2Color(2000)).toBe(RED);
+  });
+
+  it('holds green flat across the good band, so a fresh reading is never olive', () => {
+    for (const ppm of [400, 500, 650, 799]) expect(co2Color(ppm)).toBe(GREEN);
+  });
+
+  it('clamps outside the resting domain', () => {
+    for (const ppm of [0, 200, 399]) expect(co2Color(ppm)).toBe(GREEN);
+    for (const ppm of [2001, 2500, 3400]) expect(co2Color(ppm)).toBe(RED);
+  });
+
+  it('moves each channel straight from one anchor to the next, with no overshoot', () => {
+    // Rules out a hue path, which would bulge brighter than both neighbouring anchors
+    // mid-leg and make mid-range readings the loudest thing on the chart.
+    for (const [lo, hi] of [
+      [800, 1000],
+      [1000, 2000],
+    ]) {
+      const from = rgb(co2Color(lo));
+      const to = rgb(co2Color(hi));
+      let prev = from;
+      for (let ppm = lo; ppm <= hi; ppm += (hi - lo) / 20) {
+        const at = rgb(co2Color(ppm));
+        at.forEach((c, i) => {
+          expect(c).toBeGreaterThanOrEqual(Math.min(from[i], to[i]));
+          expect(c).toBeLessThanOrEqual(Math.max(from[i], to[i]));
+          expect(Math.abs(c - to[i])).toBeLessThanOrEqual(Math.abs(prev[i] - to[i]));
+        });
+        prev = at;
+      }
     }
+  });
+
+  it('anchors on the bands and the resting domain, not on its own literals', () => {
+    // Green holds to the fair band's lower edge and amber sits at that band's centre…
+    expect(co2Color(CO2_THRESHOLDS.fair)).toBe(GREEN);
+    expect(co2Color((CO2_THRESHOLDS.fair + CO2_THRESHOLDS.poor) / 2)).toBe(AMBER);
+    // …while the ends are the resting y-domain's, so a chart at rest shows the whole
+    // ramp edge to edge and nothing above the ceiling reads as anything but red.
+    const [floor, ceiling] = scaleDomains([[], [], [], []]).co2;
+    expect(co2Color(floor)).toBe(GREEN);
+    expect(co2Color(ceiling)).toBe(RED);
+    expect(co2Color(ceiling - 100)).not.toBe(RED);
+  });
+
+  it('exposes the same ramp the chart paints as a gradient', () => {
+    // The chart builds its CanvasGradient from these stops, so if they disagreed with
+    // co2Color the line and the hero would show two colours for one reading.
+    expect(CO2_RAMP.map((s) => s.ppm)).toEqual([400, 800, 1000, 2000]);
+    for (const stop of CO2_RAMP) expect(co2Color(stop.ppm)).toBe(stop.color);
+  });
+
+  it('places each stop along the ramp span the gradient is pinned to', () => {
+    // The chart anchors the gradient's two ends at the first and last stops' ppm, so
+    // an offset must be that stop's fraction of the span between them.
+    expect(CO2_RAMP.map((s) => s.offset)).toEqual([0, 0.25, 0.375, 1]);
   });
 });
 
@@ -202,9 +282,10 @@ describe('scaleDomains', () => {
     expect(d['%RH']).toEqual([0, 100]);
   });
 
-  it('keeps both CO₂ band boundaries in frame at rest', () => {
-    // The hero's colour verdict must agree with the line's height: 800 fair and 1200
-    // poor both sit inside the drawn domain of a History that never escapes its base.
+  it('keeps the verdict thresholds in frame at rest', () => {
+    // The line's height must let the reader place a Sample against the words: 800 fair
+    // and 1200 poor both sit inside the drawn domain of a History that never escapes
+    // its base.
     const [lo, hi] = scaleDomains(history([[430, 2100, 5000], [780, 2100, 5000]])).co2;
 
     expect(lo).toBeLessThan(CO2_THRESHOLDS.fair);

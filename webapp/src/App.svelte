@@ -8,12 +8,13 @@
    * connect/Sync/reconnect orchestration — lives in the tested `Fleet`. What remains
    * here is pure presentation: a trivial `selectedId`, the dashboard.ts transforms,
    * text formatting, and the production FleetDeps wiring.
-   *   - Live reading  → CO₂-hero (colour-banded) + secondary temp/humidity.
+   *   - Live reading  → CO₂-hero, number and verdict word coloured by the ramp, plus
+   *     secondary temp/humidity.
    *   - Per-Pod History → uPlot timeseries, whole History in, view owned by the chart.
    */
   import Chart from "./lib/Chart.svelte";
   import PodPicker from "./lib/PodPicker.svelte";
-  import { co2Band, toPlotData, type PlotData } from "./lib/dashboard";
+  import { co2Color, co2Verdict, toPlotData, type PlotData } from "./lib/dashboard";
   import { deleteHistory, History, listPodIds } from "./lib/history";
   import { Fleet } from "./lib/fleet";
   import { Names } from "./lib/names";
@@ -101,7 +102,10 @@
   const connected = $derived(selected?.connected ?? false);
   const syncing = $derived(selected?.syncing ?? false);
 
-  const band = $derived(live ? co2Band(live.co2) : null);
+  // The word and the colour come apart (ticket 18): the word is the band it lands in,
+  // the colour a continuous function of the reading, shared with the chart's line.
+  const verdict = $derived(live ? co2Verdict(live.co2) : null);
+  const heroColor = $derived(live ? co2Color(live.co2) : null);
 
   // The chart is fed the whole History (ticket 16a): no slicing here, the visible
   // window is the chart's own state.
@@ -148,7 +152,7 @@
   <section
     class="hero"
     class:stale={!connected}
-    style={band ? `--band: ${band.color}` : undefined}
+    style={heroColor ? `--co2: ${heroColor}` : undefined}
   >
     {#if syncing}
       <span class="sync" title="Syncing…" aria-label="Syncing">
@@ -161,8 +165,8 @@
     </div>
     {#if !connected}
       <span class="verdict muted">Not connected</span>
-    {:else if band}
-      <span class="verdict">{band.label}</span>
+    {:else if verdict}
+      <span class="verdict">{verdict.label}</span>
     {:else}
       <span class="verdict muted">Waiting for a reading…</span>
     {/if}
@@ -181,7 +185,7 @@
       <!-- Keyed on the Pod: switching Pods is not a Merge, so the chart is rebuilt and
            opens on its own 24 h-at-"now" rather than inheriting the last Pod's view. -->
       {#key selected?.id}
-        <Chart data={plotData} co2Color={band?.color ?? "#3fb950"} />
+        <Chart data={plotData} />
       {/key}
     {:else}
       <p class="notice muted">
@@ -209,7 +213,7 @@
   }
 
   .hero {
-    --band: #8b949e;
+    --co2: #8b949e;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -260,7 +264,7 @@
     font-size: 4.5rem;
     font-weight: 700;
     line-height: 1;
-    color: var(--band);
+    color: var(--co2);
     font-variant-numeric: tabular-nums;
   }
 
@@ -272,7 +276,7 @@
   .verdict {
     font-size: 1rem;
     font-weight: 600;
-    color: var(--band);
+    color: var(--co2);
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }

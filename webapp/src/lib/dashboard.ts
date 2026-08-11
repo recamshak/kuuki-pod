@@ -1,13 +1,13 @@
 /*
  * Pure view-support logic for the one-screen dashboard (ticket 10, reworked in 16a,
- * 16b and 17).
+ * 16b, 17 and 18).
  *
  * The Svelte shell and the uPlot wrapper are the untestable seams; the decisions live
  * in tested modules — this one and its gesture companion `gestures.ts`, which owns the
- * touch state machine and the View's zoom-and-pan limits. Here: how a CO₂ number maps
- * to a colour band, which slice of time the chart shows and when that window follows
- * fresh data, which Sample a selection snaps to, how stored Samples become uPlot's
- * column arrays, and the y-domain each series is drawn against.
+ * touch state machine and the View's zoom-and-pan limits. Here: which verdict word a
+ * CO₂ reading earns and what colour it is, which slice of time the chart shows and
+ * when that window follows fresh data, which Sample a selection snaps to, how stored
+ * Samples become uPlot's column arrays, and the y-domain each series is drawn against.
  *
  * No DOM, no Bluetooth, no framework — Samples in, plain values out. The one import
  * with a life outside this module is `uplot`, for its static `rangeNum` padding helper;
@@ -17,33 +17,31 @@
 import uPlot from 'uplot';
 import type { Sample } from './history';
 
-/** A CO₂ colour band: the traffic-light verdict shown behind the hero number. */
-export interface Co2Band {
+/** The verdict word shown under the hero number. Colour is `co2Color`'s job. */
+export interface Co2Verdict {
   level: 'good' | 'fair' | 'poor';
   /** Short human verdict, e.g. "Fresh". */
   label: string;
-  /** CSS colour used for the hero number and the chart's CO₂ line. */
-  color: string;
 }
 
 /**
- * ppm boundaries between bands. ~800/1200 ppm are the common indoor-air rules of
+ * ppm boundaries between verdicts. ~800/1200 ppm are the common indoor-air rules of
  * thumb (below ~800 is well-ventilated; above ~1200 is stuffy). `fair` is the
  * half-open span [FAIR, POOR); `poor` is FAIR-and-above… i.e. POOR-and-above.
  */
 export const CO2_THRESHOLDS = { fair: 800, poor: 1200 } as const;
 
-const BANDS: Record<Co2Band['level'], Co2Band> = {
-  good: { level: 'good', label: 'Fresh', color: '#3fb950' },
-  fair: { level: 'fair', label: 'Stuffy', color: '#d29922' },
-  poor: { level: 'poor', label: 'Poor', color: '#f85149' },
+const VERDICTS: Record<Co2Verdict['level'], Co2Verdict> = {
+  good: { level: 'good', label: 'Fresh' },
+  fair: { level: 'fair', label: 'Stuffy' },
+  poor: { level: 'poor', label: 'Poor' },
 };
 
-/** Map a CO₂ reading (ppm) to its colour band. */
-export function co2Band(co2: number): Co2Band {
-  if (co2 >= CO2_THRESHOLDS.poor) return BANDS.poor;
-  if (co2 >= CO2_THRESHOLDS.fair) return BANDS.fair;
-  return BANDS.good;
+/** The word a CO₂ reading (ppm) earns. */
+export function co2Verdict(co2: number): Co2Verdict {
+  if (co2 >= CO2_THRESHOLDS.poor) return VERDICTS.poor;
+  if (co2 >= CO2_THRESHOLDS.fair) return VERDICTS.fair;
+  return VERDICTS.good;
 }
 
 /**
@@ -118,8 +116,8 @@ export type YDomain = [min: number, max: number];
  * shown, never how tall a value looks.
  *
  * - CO₂ 400–2000 ppm: 400 is ambient outdoor air (the floor the SCD40 reports under
- *   ADR-0003's ASC assumption); 2000 clears the poor threshold, so both band
- *   boundaries stay in frame and the hero's colour always agrees with the line.
+ *   ADR-0003's ASC assumption); 2000 clears the poor threshold. The colour ramp below
+ *   is anchored on both, so a chart at rest shows the whole ramp edge to edge.
  * - Humidity 0–100 %RH: its definitional range.
  * - Temperature 18–24 °C: the band where "is this room comfortable?" is decided, so a
  *   typical 1–3 °C overnight swing fills a useful share of the panel.
@@ -129,6 +127,81 @@ const SCALE_BASES: Record<ScaleKey, YDomain> = {
   '°C': [18, 24],
   '%RH': [0, 100],
 };
+
+/**
+ * CO₂'s swatch colour: the ramp's midpoint anchor, standing for the whole series
+ * wherever one flat colour is needed instead of the ramp (the chart's legend key and
+ * its selection dot, both of which are DOM and cannot hold a gradient).
+ */
+export const CO2_SWATCH_COLOR = '#d29922';
+
+/** One anchor of the CO₂ colour ramp: the colour that reading is exactly. */
+export interface Co2Stop {
+  ppm: number;
+  color: string;
+  /** Where the stop sits along the ramp, 0 at its floor and 1 at its ceiling. */
+  offset: number;
+}
+
+/**
+ * The CO₂ **colour ramp**: colour as a continuous function of the reading, shared by
+ * the hero number, the verdict word and the chart's CO₂ line. Every stop is derived
+ * rather than chosen, so the invariants hold by construction: the ends are the Scale
+ * base, so the resting chart spans exactly the whole ramp, and amber sits at the centre
+ * of the fair band. Reading the *static* base — never `scaleDomains`' widened output —
+ * is what stops one record spike silently recolouring all of history.
+ *
+ * Green holds flat across the whole good band: colour starts moving exactly where the
+ * verdict word flips, and the state the app spends most of its life in keeps the clean
+ * green rather than sliding into olive.
+ */
+export const CO2_RAMP: readonly Co2Stop[] = withOffsets([
+  { ppm: SCALE_BASES.co2[0], color: '#3fb950' },
+  { ppm: CO2_THRESHOLDS.fair, color: '#3fb950' },
+  { ppm: (CO2_THRESHOLDS.fair + CO2_THRESHOLDS.poor) / 2, color: CO2_SWATCH_COLOR },
+  { ppm: SCALE_BASES.co2[1], color: '#f85149' },
+]);
+
+/**
+ * Place each stop along the ramp's own span. The chart pins a `CanvasGradient` to the
+ * first and last stops' ppm and needs the rest as fractions of that span, so the
+ * arithmetic belongs here rather than in the untestable uPlot seam (ADR-0004).
+ */
+function withOffsets(stops: Omit<Co2Stop, 'offset'>[]): Co2Stop[] {
+  const from = stops[0].ppm;
+  const span = stops[stops.length - 1].ppm - from;
+  return stops.map((stop) => ({ ...stop, offset: (stop.ppm - from) / span }));
+}
+
+/**
+ * The colour of a CO₂ reading: the ramp, interpolated in plain sRGB and clamped at both
+ * ends. sRGB is not a detail — a canvas gradient blends opaque stops in exactly the
+ * same space, so the chart's line and the hero number cannot drift apart.
+ */
+export function co2Color(ppm: number): string {
+  for (let i = 1; i < CO2_RAMP.length; i++) {
+    const hi = CO2_RAMP[i];
+    const lo = CO2_RAMP[i - 1];
+    if (ppm <= hi.ppm) {
+      if (ppm <= lo.ppm) return lo.color;
+      return mixSrgb(lo.color, hi.color, (ppm - lo.ppm) / (hi.ppm - lo.ppm));
+    }
+  }
+  return CO2_RAMP[CO2_RAMP.length - 1].color;
+}
+
+/** Blend two `#rrggbb` colours channel-wise, `t` running 0 (`a`) to 1 (`b`). */
+function mixSrgb(a: string, b: string, t: number): string {
+  let hex = '#';
+  for (let i = 1; i < 7; i += 2) {
+    const from = Number.parseInt(a.slice(i, i + 2), 16);
+    const to = Number.parseInt(b.slice(i, i + 2), 16);
+    hex += Math.round(from + (to - from) * t)
+      .toString(16)
+      .padStart(2, '0');
+  }
+  return hex;
+}
 
 /**
  * uPlot's own padding multiple for a numeric y-scale: widen by a tenth of the span and

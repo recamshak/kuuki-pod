@@ -69,8 +69,12 @@ The slice of time the chart currently shows: an x-range in unix seconds, owned b
 _Avoid_: range selector, slice (the deleted range buttons pre-sliced Samples; a View only moves what is drawn)
 
 **Scale base**:
-The y-axis counterpart to the **View**: each series' resting y-domain, independent of what the chart is showing (ticket 17). CO₂ rests at 400–2000 ppm (both colour-band boundaries in frame), humidity at 0–100 %RH, temperature at 18–24 °C. A base is widened — never narrowed — on whichever side the *whole* History escapes it, out to a padded round number, so a record spike lifts the ceiling for the session and tonight's reading can be read against that record. Because the extent comes from every Sample and not the visible ones, a pan or a pinch can never move a y-axis; only a Merge that breaks a record can.
+The y-axis counterpart to the **View**: each series' resting y-domain, independent of what the chart is showing (ticket 17). CO₂ rests at 400–2000 ppm — the span of the **Colour ramp**, so a chart at rest shows the whole ramp edge to edge — humidity at 0–100 %RH, temperature at 18–24 °C. A base is widened — never narrowed — on whichever side the *whole* History escapes it, out to a padded round number, so a record spike lifts the ceiling for the session and tonight's reading can be read against that record. Because the extent comes from every Sample and not the visible ones, a pan or a pinch can never move a y-axis; only a Merge that breaks a record can.
 _Avoid_: y-range, auto-scale, fixed axis (the base is a resting domain, not a hard limit)
+
+**Colour ramp**:
+CO₂'s colour as a continuous function of the reading (ticket 18), the one answer shared by the hero number, the verdict word, and the chart's CO₂ line — which is stroked with it as a vertical gradient in value space, so a Sample's colour follows its ppm and a pan can never recolour it. Anchored on what already exists: green from the **Scale base**'s floor flat across the good band (400–800 ppm), then green → amber at the centre of the fair band (1000) → red at the base's ceiling (2000), clamped outside. 800 and 1200 ppm still cut the verdict word into Fresh / Stuffy / Poor, but they are no longer three flat colours.
+_Avoid_: colour band, traffic light (the word steps at a threshold; the colour never does)
 
 **Live edge**:
 The newest Sample in a History, and by extension a View parked with its right edge at or past that Sample. A Merge slides a View that is at the live edge forward with the fresh Samples; a View panned into the past is never moved.
